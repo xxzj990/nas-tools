@@ -18,8 +18,8 @@
       <div class="col-12">
         <div class="row row-cards">
           {% for Scheduler in SchedulerTasks %}
-          <div class="col-sm-6 col-lg-3">
-            <div class="card card-sm">
+          <div class="col-12 col-md-6 col-xl-3">
+            <div class="card card-sm card-link-pop">
               <div class="card-body">
                 <div class="row align-items-center">
                   <div class="col-auto">
@@ -65,51 +65,7 @@
   </div>
 </div>
 {% endif %}
-<div class="modal modal-blur fade" id="service-modal" tabindex="-1" role="dialog" aria-hidden="true">
-  <div class="modal-dialog modal-sm modal-dialog-centered" role="document">
-    <div class="modal-content">
-      <div class="modal-body">
-        <div class="modal-title">确认提示</div>
-        <div id="service_start_message">是否确定立即运行服务？</div>
-      </div>
-      <div class="modal-footer">
-        <input type="hidden" id="service_start_id" />
-        <button type="button" class="btn btn-link link-secondary me-auto" data-bs-dismiss="modal">取消</button>
-        <button type="button" class="btn btn-danger" id="service_start_btn">确定</button>
-      </div>
-    </div>
-  </div>
-</div>
-<div class="modal modal-blur fade" id="service-modal-success" tabindex="-1" role="dialog" aria-hidden="true">
-  <div class="modal-dialog modal-sm modal-dialog-centered" role="document">
-    <div class="modal-content">
-      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      <div class="modal-status bg-success"></div>
-      <div class="modal-body text-center py-4">
-        <svg xmlns="http://www.w3.org/2000/svg" class="icon mb-2 text-green icon-lg" width="24" height="24"
-          viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round"
-          stroke-linejoin="round">
-          <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-          <circle cx="12" cy="12" r="9" />
-          <path d="M9 12l2 2l4 -4" />
-        </svg>
-        <h3>成功</h3>
-        <input type="hidden" id="service_start_name" />
-        <div class="text-muted" id="service_finished_str">服务已在后台运行...</div>
-      </div>
-      <div class="modal-footer">
-        <div class="w-100">
-          <div class="row">
-            <div class="col"><a href="#" class="btn btn-success w-100" data-bs-dismiss="modal">
-                确定
-              </a></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-<div class="modal modal-blur fade" id="modal-logging" tabindex="-1" role="dialog" aria-hidden="true">
+<div class="modal modal-blur fade" id="modal-logging" tabindex="-1" role="dialog" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
   <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable" role="document">
     <div class="modal-content">
       <div class="modal-header">
@@ -128,6 +84,38 @@
     </div>
   </div>
 </div>
+<div class="modal modal-blur fade" id="modal-nametest" tabindex="-1" role="dialog" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="card border-top-0">
+        <div class="card-header">
+          <h5 class="modal-title">名称识别测试</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <div class="col">
+              <div class="mb-3">
+                <label class="form-label">资源名称 <span class="form-help bg-red-lt" title="用于测试名称识别情况，如命名太离谱实在难于兼容，合理范围内无法识别的可在Github反馈" data-bs-toggle="tooltip">?</span></label>
+                <input type="text" value="" id="test_name" class="form-control" placeholder="种子名/文件名等">
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <div class="mb-3" id="test_result">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-white me-auto" data-bs-dismiss="modal">关闭</button>
+        <button id="nametest_btn" class="btn btn-primary">识别</button>
+      </div>
+    </div>
+  </div>
+</div>
 <script type="text/javascript">
 
   //刷新LOG标志
@@ -142,15 +130,18 @@
     refresh_logging_flag = false;
   }
   //刷新日志
-  function refresh_logging() {
+  function refresh_logging(flag) {
     ajax_post("logging", {}, function (ret) {
       if (ret.text) {
-        $("#logging_content").html(ret.text);
+        $("#logging_content").append(ret.text);
         var height = $('#logging_content').prop("scrollHeight");
         $('#logging_content').scrollTop(height);
-        if (refresh_logging_flag == true) {
-          setTimeout("refresh_logging()", 2000);
-        }
+      }
+      if($("#modal-logging").is(":hidden") && flag){
+        stop_logging();
+      }
+      if (refresh_logging_flag == true) {
+        setTimeout("refresh_logging(true)", 2000);
       }
     });
   }
@@ -158,24 +149,31 @@
   // 显示服务提示框
   function show_service_modal(id, name) {
     if (id == "logging") {
-      start_logging();
       $('#modal-logging').modal('show');
+      start_logging();
+    } else if (id == "nametest") {
+      $('#modal-nametest').modal('show');
+      start_logging();
+    } else if (id == "blacklist"){
+      show_confirm_modal("清理缓存后，已转移过的文件允许重新转移（包括识别错误的文件），是否确认？", function(){
+        hide_confirm_modal();
+        ajax_post("truncate_blacklist", {}, function (ret) {
+          show_success_modal("文件缓存清理完成！");
+        });
+      });
     } else {
-      $("#service_start_id").val(id);
-      $("#service_start_name").val(name);
-      $("#service_start_message").text("是否立即运行 " + name + "？");
-      $('#service-modal').modal('show');
+      show_ask_modal("是否立即运行 " + name + "？", function () {
+        hide_ask_modal();
+        run_scheduler(id, name);
+      });
     }
   }
 
   // 运行服务
-  function run_scheduler(id) {
-    var cmd = "sch";
+  function run_scheduler(id, name) {
     var data = { "item": id };
-    ajax_post(cmd, data, function (ret) {
-      item = $("#service_start_name").val();;
-      $("#service_finished_str").text(item + " 服务启动成功，将在后台运行。");
-      $("#service-modal-success").modal('show');
+    ajax_post("sch", data, function (ret) {
+      show_success_modal(name + " 服务启动成功，正在后台运行");
     });
   }
 
@@ -190,18 +188,70 @@
     }
   }
 
-  //服务模态框事件
-  $("#service_start_btn").click(function () {
-    $('#service-modal').modal('hide');
-    run_scheduler($("#service_start_id").val());
-  });
-
   //实时日志关闭
   $("#logging_close_btn").click(function () {
     stop_logging();
   });
+
   $("#logging_close_head").click(function () {
     stop_logging();
   });
+
+  $("#nametest_btn").click(function () {
+    name_test();
+  });
+
+  //名称识别测试
+  function name_test(){
+    var name = $("#test_name").val();
+    if(!name){
+      $("#test_name").addClass("is-invalid");
+      return;
+    }else{
+      $("#test_name").removeClass("is-invalid");
+    }
+    $("#nametest_btn").text("识别中");
+    $("#nametest_btn").attr("disabled", true);
+    ajax_post("name_test", {"name": name}, function (ret) {
+      $("#nametest_btn").text("识别");
+      $("#nametest_btn").attr("disabled", false);
+      if(ret.code == 0){
+        $("#test_result").empty();
+        if(ret.data.type){
+          $("#test_result").append('<span class="badge badge-outline text-blue me-1 mb-1" title="类型">' + ret.data.type + '</span>');
+        }
+        if(ret.data.category){
+          $("#test_result").append('<span class="badge badge-outline text-blue me-1 mb-1" title="类别">' + ret.data.category + '</span>');
+        }
+        if(ret.data.name){
+          $("#test_result").append('<span class="badge badge-outline text-red me-1 mb-1" title="识别名称">' + ret.data.name + '</span>');
+        }
+        if(ret.data.title){
+          $("#test_result").append('<span class="badge badge-outline text-red me-1 mb-1" title="标题">' + ret.data.title + '</span>');
+        }
+        if(ret.data.year){
+          $("#test_result").append('<span class="badge badge-outline text-orange me-1 mb-1" title="年份">' + ret.data.year + '</span>');
+        }
+        if(ret.data.season_episode){
+          $("#test_result").append('<span class="badge badge-outline text-orange me-1 mb-1" title="季集">' + ret.data.season_episode + '</span>');
+        }
+        if(ret.data.tmdbid){
+          $("#test_result").append('<span class="badge badge-outline text-green me-1 mb-1" title="TMDB ID">' + ret.data.tmdbid + '</span>');
+        }
+        if(ret.data.restype){
+          $("#test_result").append('<span class="badge me-1 mb-1" title="质量">' + ret.data.restype + '</span>');
+        }
+        if(ret.data.pix){
+          $("#test_result").append('<span class="badge me-1 mb-1" title="分辨率">' + ret.data.pix + '</span>');
+        }
+        if(ret.data.video_codec){
+          $("#test_result").append('<span class="badge me-1 mb-1" title="视频编码">' + ret.data.video_codec + '</span>');
+        }
+        if(ret.data.audio_codec){
+          $("#test_result").append('<span class="badge me-1 mb-1" title="音频编码">' + ret.data.audio_codec + '</span>');
+        }
+      }
+    });
+  }
 
 </script>

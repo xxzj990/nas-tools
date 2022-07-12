@@ -1,13 +1,12 @@
-name: Nas-tools Build Docker Image
+name: Build Image
 on:
   workflow_dispatch:
   push:
     branches:
       - master
     paths:
-      - requirements.txt
-      - docker/Dockerfile
-      - docker/entrypoint.sh
+      - version.py
+      - .github/workflows/build-image.yml
 
 jobs:
   build:

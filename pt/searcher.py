@@ -1,4 +1,3 @@
-import re
 import log
 from config import Config
 from message.send import Message
@@ -6,7 +5,7 @@ from pt.downloader import Downloader
 from pt.indexer.jackett import Jackett
 from pt.indexer.prowlarr import Prowlarr
 from rmt.media import Media
-from utils.functions import str_filesize
+from rmt.meta.metabase import MetaBase
 from utils.sqls import delete_all_search_torrents, insert_search_results
 from utils.types import SearchType, MediaType
 
@@ -32,59 +31,44 @@ class Searcher:
         else:
             self.indexer = Jackett()
 
-    # 根据关键字检索
-    def search_medias(self, key_word, s_num, e_num, year, mtype, whole_word):
+    def search_medias(self, key_word, filter_args: dict, match_type, match_words=None):
+        """
+        根据关键字调用索引器检查媒体
+        :param key_word: 检索的关键字，不能为空
+        :param filter_args: 过滤条件
+        :param match_type: 匹配模式：0-识别并模糊匹配；1-识别并精确匹配；2-不识别匹配
+        :param match_words: 匹配的关键字
+        :return: 命中的资源媒体信息列表
+        """
         if not key_word:
             return []
         if not self.indexer:
             return []
-        return self.indexer.search_by_keyword(key_word, s_num, e_num, year, mtype, whole_word)
+        return self.indexer.search_by_keyword(key_word=key_word,
+                                              filter_args=filter_args,
+                                              match_type=match_type,
+                                              match_words=match_words)
 
-    # 检索一个媒体
-    def search_one_media(self, input_str, in_from=SearchType.OT, user_id=None):
-        if not input_str:
-            log.info("【SEARCHER】检索关键字有误！")
-            return False
-        # 去掉查询中的电影或电视剧关键字
-        if re.search(r'^电视剧|\s+电视剧|^动漫|\s+动漫', input_str):
-            mtype = MediaType.TV
-        else:
-            mtype = None
-        content = re.sub(r'^电影|^电视剧|^动漫|\s+电影|\s+电视剧|\s+动漫', '', input_str).strip()
-        if not content:
-            return
-        # 识别媒体信息
-        log.info("【SEARCHER】正在识别 %s 的媒体信息..." % content)
-        media_info = self.media.get_media_info(title=content, mtype=mtype, strict=True)
-        if media_info and media_info.tmdb_info:
-            log.info("类型：%s，标题：%s，年份：%s" % (media_info.type.value, media_info.title, media_info.year))
-            if in_from in [SearchType.WX, SearchType.TG]:
-                self.message.send_channel_msg(channel=in_from,
-                                              title="类型：%s，标题：%s，年份：%s" % (
-                                                  media_info.type.value, media_info.title, media_info.year),
-                                              user_id=user_id)
-            # 检查是否存在，电视剧返回不存在的集清单
-            exist_flag, no_exists, messages = self.downloader.check_exists_medias(meta_info=media_info)
-            if messages and in_from in [SearchType.WX, SearchType.TG]:
-                self.message.send_channel_msg(channel=in_from, title="\n".join(messages))
-            if exist_flag is None:
-                return False
-            elif exist_flag:
-                return True
-        else:
-            if in_from in [SearchType.WX, SearchType.TG]:
-                self.message.send_channel_msg(channel=in_from,
-                                              title="%s 不是电影或者电视剧名称" % content,
-                                              user_id=user_id)
-            log.info("【SEARCHER】%s 不是电影或者电视剧名称" % content)
-            return False
+    def search_one_media(self, media_info: MetaBase,
+                         in_from: SearchType,
+                         no_exists: dict,
+                         sites: list = None,
+                         filters: dict = None):
+        """
+        只检索和下载一个资源，用于精确检索下载，由微信、Telegram或豆瓣调用
+        :param media_info: 已识别的媒体信息
+        :param in_from: 搜索渠道
+        :param no_exists: 缺失的剧集清单
+        :param sites: 检索哪些站点
+        :param filters: 过滤条件，为空则不过滤
+        :return: 请求的资源是否全部下载完整
+                 请求的资源如果是剧集则返回下载后仍然缺失的季集信息
+                 搜索到的结果数量
+                 下载到的结果数量，如为None则表示未开启自动下载
+        """
+        if not media_info:
+            return False, {}, 0, 0
 
-        # 开始真正搜索资源
-        if in_from in [SearchType.WX, SearchType.TG]:
-            self.message.send_channel_msg(channel=in_from,
-                                          title="开始检索 %s ..." % media_info.title,
-                                          user_id=user_id)
-        log.info("【SEARCHER】开始检索 %s ..." % media_info.title)
         # 查找的季
         if not media_info.begin_season:
             search_season = None
@@ -94,96 +78,58 @@ class Searcher:
         search_episode = media_info.get_episode_list()
         if search_episode and not search_season:
             search_season = [1]
-        media_list = self.search_medias(key_word=media_info.title,
-                                        s_num=search_season,
-                                        e_num=search_episode,
-                                        year=media_info.year,
-                                        mtype=media_info.type,
-                                        whole_word=True)
+        # 如果原标题是英文：用原标题去检索，否则使用英文+原标题搜索去匹配，优化小语种资源
+        search_title = media_info.title
+        if media_info.original_language != "en":
+            en_info = Media().get_tmdb_info(mtype=media_info.type, tmdbid=media_info.tmdb_id, language="en-US")
+            if en_info:
+                search_title = en_info.get("title") if media_info.type == MediaType.MOVIE else en_info.get("name")
+        else:
+            search_title = media_info.original_title
+        match_words = [media_info.title, search_title] if search_title != media_info.title else [media_info.title]
+        # 过滤条件
+        filter_args = {"season": search_season,
+                       "episode": search_episode,
+                       "year": media_info.year,
+                       "type": media_info.type,
+                       "site": sites}
+        if filters:
+            filter_args.update(filters)
+        # 开始搜索
+        log.info("【SEARCHER】开始检索 %s ..." % search_title)
+        media_list = self.search_medias(key_word=search_title,
+                                        filter_args=filter_args,
+                                        match_type=1,
+                                        match_words=match_words)
         if len(media_list) == 0:
-            log.info("%s 未检索到任何资源" % media_info.title)
-            if in_from in [SearchType.WX, SearchType.TG]:
-                self.message.send_channel_msg(channel=in_from,
-                                              title="%s 未检索到任何资源" % media_info.title,
-                                              user_id=user_id)
-            return False
+            log.info("%s 未搜索到任何资源" % search_title)
+            return False, no_exists, 0, 0
         else:
             if in_from in [SearchType.WX, SearchType.TG]:
-                # 保存微信搜索记录
+                # 保存搜索记录
                 delete_all_search_torrents()
+                # 搜索结果排序
+                media_list = sorted(media_list, key=lambda x: "%s%s%s%s" % (str(x.title).ljust(100, ' '),
+                                                                            str(x.res_order).rjust(3, '0'),
+                                                                            str(x.site_order).rjust(3, '0'),
+                                                                            str(x.seeders).rjust(10, '0')),
+                                    reverse=True)
                 # 插入数据库
-                save_media_list = self.get_torrents_group_item(media_list)
-                for save_media_item in save_media_list:
-                    insert_search_results(save_media_item)
-                self.message.send_channel_msg(channel=in_from,
-                                              title=media_info.get_title_vote_string(),
-                                              text="%s 共检索到 %s 个有效资源" % (media_info.title, len(save_media_list)),
-                                              image=media_info.get_message_image(),
-                                              url='search',
-                                              user_id=user_id)
-            # 微信未开自动下载时返回
-            if in_from in [SearchType.WX, SearchType.TG] and not self.__search_auto:
-                return False
+                insert_search_results(media_list)
+                # 微信未开自动下载时返回
+                if not self.__search_auto:
+                    return False, no_exists, len(media_list), None
             # 择优下载
-            download_num, left_medias = self.downloader.check_and_add_pt(in_from, media_list, no_exists)
+            download_items, left_medias = self.downloader.check_and_add_pt(in_from, media_list, no_exists)
             # 统计下载情况，下全了返回True，没下全返回False
-            if download_num == 0:
-                log.info("【SEARCHER】%s 搜索结果中没有符合下载条件的资源" % content)
-                if in_from in [SearchType.WX, SearchType.TG]:
-                    self.message.send_channel_msg(channel=in_from,
-                                                  title="%s 搜索结果中没有符合下载条件的资源" % content,
-                                                  user_id=user_id)
-                return False
+            if not download_items:
+                log.info("【SEARCHER】%s 未下载到资源" % media_info.title)
+                return False, left_medias, len(media_list), 0
             else:
-                log.info("【SEARCHER】实际下载了 %s 个资源" % download_num)
-                # 比较要下的都下完了没有，来决定返回什么状态
+                log.info("【SEARCHER】实际下载了 %s 个资源" % len(download_items))
+                # 还有剩下的缺失，说明没下完，返回False
                 if left_medias:
-                    return False
-            return True
-
-    # 种子去重，每一个名称、站点、资源类型 选一个做种人最多的显示
-    @staticmethod
-    def get_torrents_group_item(media_list):
-        if not media_list:
-            return []
-
-        # 排序函数
-        def get_sort_str(x):
-            # 排序：标题、最优规则、站点、做种
-            return "%s%s%s%s" % (str(x.title).ljust(100, ' '),
-                                 str(x.res_order).rjust(3, '0'),
-                                 str(x.site_order).rjust(3, '0'),
-                                 str(x.seeders).rjust(10, '0'))
-
-        # 匹配的资源中排序分组
-        media_list = sorted(media_list, key=lambda x: get_sort_str(x), reverse=True)
-        log.debug("【PT】种子信息排序后如下：")
-        for media_item in media_list:
-            log.debug("标题：%s，"
-                      "站点序号：%s，"
-                      "优先序号：%s，"
-                      "做种数：%s，"
-                      "描述：%s" % (media_item.get_title_string(),
-                                 media_item.site_order,
-                                 media_item.res_order,
-                                 media_item.seeders,
-                                 media_item.description))
-        # 控重
-        can_download_list_item = []
-        can_download_list = []
-        # 按分组显示
-        for t_item in media_list:
-            if t_item.type == MediaType.TV:
-                media_name = "%s%s%s%s%s" % (t_item.get_title_string(),
-                                             t_item.site,
-                                             t_item.get_resource_type_string(),
-                                             t_item.get_season_episode_string(),
-                                             str_filesize(t_item.size))
-            else:
-                media_name = "%s%s%s%s" % (
-                    t_item.get_title_string(), t_item.site, t_item.get_resource_type_string(),
-                    str_filesize(t_item.size))
-            if media_name not in can_download_list:
-                can_download_list.append(media_name)
-                can_download_list_item.append(t_item)
-        return can_download_list_item
+                    return False, left_medias, len(media_list), len(download_items)
+                # 全部下完了
+                else:
+                    return True, no_exists, len(media_list), len(download_items)

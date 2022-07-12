@@ -1,27 +1,34 @@
+import json
 import os
 import re
 import shutil
 import socket
+import threading
 import subprocess
 import time
 import platform
 import bisect
 import datetime
+from enum import Enum
+
 from utils.types import OsType
 
 INSTANCES = {}
+lock = threading.RLock()
 
 
 # 单例模式注解
 def singleton(cls):
-    # 单下划线的作用是这个变量只能在当前模块里访问,仅仅是一种提示作用
     # 创建字典用来保存类的实例对象
     global INSTANCES
 
     def _singleton(*args, **kwargs):
         # 先判断这个类有没有对象
         if cls not in INSTANCES:
-            INSTANCES[cls] = cls(*args, **kwargs)  # 创建一个对象,并保存到字典当中
+            with lock:
+                if cls not in INSTANCES:
+                    INSTANCES[cls] = cls(*args, **kwargs)
+                    pass
         # 将实例对象返回
         return INSTANCES[cls]
 
@@ -46,6 +53,32 @@ def str_filesize(size):
     return str(round(size / (b + 1), 2)) + u
 
 
+# 将文件大小文本转化为字节
+def num_filesize(text):
+    if not text:
+        return 0
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.replace(",", "").replace(" ", "").upper()
+    size = re.sub(r"[KMGTPI]*B", "", text, flags=re.IGNORECASE)
+    try:
+        size = float(size)
+    except Exception as e:
+        print(str(e))
+        return 0
+    if text.find("PB") != -1 or text.find("PIB") != -1:
+        size *= 1024 ** 5
+    elif text.find("TB") != -1 or text.find("TIB") != -1:
+        size *= 1024 ** 4
+    elif text.find("GB") != -1 or text.find("GIB") != -1:
+        size *= 1024 ** 3
+    elif text.find("MB") != -1 or text.find("MIB") != -1:
+        size *= 1024 ** 2
+    elif text.find("KB") != -1 or text.find("KIB") != -1:
+        size *= 1024
+    return round(size)
+
+
 # 计算时间
 def str_timelong(time_sec):
     if not isinstance(time_sec, int) or not isinstance(time_sec, float):
@@ -64,12 +97,22 @@ def str_timelong(time_sec):
     return str(round(time_sec / (b + 1))) + u
 
 
-# 判断是否为中文
+# 判断是否含有中文
 def is_chinese(word):
     for ch in word:
         if '\u4e00' <= ch <= '\u9fff':
             return True
     return False
+
+
+# 判断是否全是中文
+def is_all_chinese(word):
+    for ch in word:
+        if '\u4e00' <= ch <= '\u9fff':
+            continue
+        else:
+            return False
+    return True
 
 
 # 执地本地命令，返回信息
@@ -94,7 +137,7 @@ def system_exec_command(cmd, timeout=60):
 
 
 # 获得目录下的媒体文件列表List，按后缀过滤
-def get_dir_files_by_ext(in_path, exts="", filesize=0):
+def get_dir_files(in_path, exts="", filesize=0, episode_format=None):
     if not in_path:
         return []
     if not os.path.exists(in_path):
@@ -103,22 +146,36 @@ def get_dir_files_by_ext(in_path, exts="", filesize=0):
     if os.path.isdir(in_path):
         for root, dirs, files in os.walk(in_path):
             for file in files:
-                ext = os.path.splitext(file)[-1]
-                if not exts or ext.lower() in exts:
-                    cur_path = os.path.join(root, file)
-                    if is_invalid_path(cur_path):
-                        continue
-                    file_size = os.path.getsize(cur_path)
-                    if cur_path not in ret_list and file_size >= filesize:
-                        ret_list.append(cur_path)
+                cur_path = os.path.join(root, file)
+                # 检查路径是否合法
+                if is_invalid_path(cur_path):
+                    continue
+                # 检查格式匹配
+                if episode_format and not episode_format.match(file):
+                    continue
+                # 检查后缀
+                if exts and os.path.splitext(file)[-1].lower() not in exts:
+                    continue
+                # 检查文件大小
+                if filesize and os.path.getsize(cur_path) < filesize:
+                    continue
+                # 命中
+                if cur_path not in ret_list:
+                    ret_list.append(cur_path)
     else:
+        # 检查路径是否合法
         if is_invalid_path(in_path):
             return []
-        ext = os.path.splitext(in_path)[-1]
-        file_size = os.path.getsize(in_path)
-        if ext.lower() in exts and file_size >= filesize:
-            if in_path not in ret_list:
-                ret_list.append(in_path)
+        # 检查后缀
+        if exts and os.path.splitext(in_path)[-1].lower() not in exts:
+            return []
+        # 检查格式
+        if episode_format and not episode_format.match(os.path.basename(in_path)):
+            return []
+        # 检查文件大小
+        if filesize and os.path.getsize(in_path) < filesize:
+            return []
+        ret_list.append(in_path)
     return ret_list
 
 
@@ -131,7 +188,7 @@ def get_dir_level1_medias(in_path, exts=""):
         for file in os.listdir(in_path):
             path = os.path.join(in_path, file)
             if os.path.isfile(path):
-                if os.path.splitext(file)[-1].lower() in exts:
+                if not exts or os.path.splitext(file)[-1].lower() in exts:
                     ret_list.append(path)
             else:
                 ret_list.append(path)
@@ -248,17 +305,6 @@ def is_path_in_path(path1, path2):
     return False
 
 
-# 根据名称判断是不是动漫
-def is_anime(name):
-    if not name:
-        return False
-    if re.search(r'\[[0-9XPI-]+]', name, re.IGNORECASE):
-        return True
-    if re.search(r'\s+-\s+\d{1,4}\s+', name, re.IGNORECASE):
-        return True
-    return False
-
-
 # 判断Sxx-Sxx Exx-Exx 是否包含关系
 def is_ses_in_ses(sea, epi, season, episode):
     # 季是否匹配
@@ -332,12 +378,82 @@ def is_ses_in_ses(sea, epi, season, episode):
 def is_bluray_dir(path):
     if not path:
         return False
-    return os.path.exists(os.path.join(path, "BDMV", "index.bdmv"))
+    if os.path.normpath(path).endswith("BDMV"):
+        return os.path.exists(os.path.join(path, "index.bdmv"))
+    else:
+        return os.path.exists(os.path.join(path, "BDMV", "index.bdmv"))
 
 
 # 转化SQL字符
 def str_sql(in_str):
-    if not in_str:
-        return ""
-    else:
-        return str(in_str).replace("'", "''")
+    return "" if not in_str else str(in_str)
+
+
+# 将普通对象转化为支持json序列化的对象
+def json_serializable(obj):
+    """
+    @param obj: 待转化的对象
+    @return: 支持json序列化的对象
+    """
+
+    def _try(o):
+        if isinstance(o, Enum):
+            return o.value
+        try:
+            return o.__dict__
+        except Exception as err:
+            print(err)
+            return str(o)
+
+    return json.loads(json.dumps(obj, default=lambda o: _try(o)))
+
+
+# 检查进程序是否存在
+def check_process(pname):
+    """
+    判断进程是否存在
+    """
+    if not pname:
+        return False
+    text = subprocess.Popen('ps -ef | grep -v grep | grep %s' % pname, shell=True).communicate()
+    return True if text else False
+
+
+def tag_value(tag_item, tag_name, attname="", default=None):
+    """
+    解析XML标签值
+    """
+    tagNames = tag_item.getElementsByTagName(tag_name)
+    if tagNames:
+        if attname:
+            attvalue = tagNames[0].getAttribute(attname)
+            if attvalue:
+                return attvalue
+        else:
+            firstChild = tagNames[0].firstChild
+            if firstChild:
+                return firstChild.data
+    return default
+
+
+def add_node(doc, parent, name, value=None):
+    """
+    添加一个DOM节点
+    """
+    node = doc.createElement(name)
+    parent.appendChild(node)
+    if value is not None:
+        text = doc.createTextNode(str(value))
+        node.appendChild(text)
+    return node
+
+
+def max_ele(a, b):
+    """
+    返回非空最大值
+    """
+    if not a:
+        return b
+    if not b:
+        return a
+    return max(a, b)
