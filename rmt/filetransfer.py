@@ -1,29 +1,33 @@
 import argparse
 import os
+import platform
+import random
 import re
+import shutil
 import traceback
 from enum import Enum
 from threading import Lock
-from subprocess import call
+from time import sleep
 
 import log
 from config import RMT_SUBEXT, RMT_MEDIAEXT, RMT_FAVTYPE, Config, RMT_MIN_FILESIZE, DEFAULT_MOVIE_FORMAT, \
     DEFAULT_TV_FORMAT
+from message.send import Message
+from pt.media_server import MediaServer
 from pt.subtitle import Subtitle
 from rmt.category import Category
-from pt.media_server import MediaServer
+from rmt.media import Media
 from rmt.meta.metabase import MetaBase
 from rmt.metainfo import MetaInfo
-from utils.functions import get_dir_files, get_free_space_gb, get_dir_level1_medias, is_invalid_path, \
-    is_path_in_path, get_system, is_bluray_dir, str_filesize
-from message.send import Message
-from rmt.media import Media
+from utils.commons import EpisodeFormat
 from utils.nfo_helper import NfoHelper
+from utils.path_utils import PathUtils
 from utils.sqls import insert_transfer_history, insert_transfer_unknown, update_transfer_unknown_state, \
     insert_transfer_blacklist, is_transfer_notin_blacklist
+from utils.string_utils import StringUtils
+from utils.system_utils import SystemUtils
 from utils.thread_helper import ThreadHelper
 from utils.types import MediaType, DownloaderType, SyncType, RmtMode, OsType
-from utils.commons import EpisodeFormat
 
 lock = Lock()
 
@@ -38,7 +42,6 @@ class FileTransfer:
 
     __system = OsType.LINUX
     __pt_rmt_mode = None
-    __sync_rmt_mode = None
     __movie_path = None
     __tv_path = None
     __anime_path = None
@@ -54,6 +57,17 @@ class FileTransfer:
     __tv_season_rmt_format = ""
     __tv_file_rmt_format = ""
     __nfo_poster = False
+    __refresh_mediaserver = False
+
+    # 转移模式
+    __sync_mode_dict = {
+        "copy": RmtMode.COPY,
+        "link": RmtMode.LINK,
+        "softlink": RmtMode.SOFTLINK,
+        "move": RmtMode.MOVE,
+        "rclone": RmtMode.RCLONE,
+        "rclonecopy": RmtMode.RCLONECOPY
+    }
 
     def __init__(self):
         self.media = Media()
@@ -65,12 +79,14 @@ class FileTransfer:
         self.init_config()
 
     def init_config(self):
-        self.__system = get_system()
+        self.__system = SystemUtils.get_system()
         config = Config()
         media = config.get_config('media')
         if media:
             # NFO开关
             self.__nfo_poster = media.get("nfo_poster")
+            # 刷新媒体库开关
+            self.__refresh_mediaserver = media.get("refresh_mediaserver")
             # 电影目录
             self.__movie_path = media.get('movie_path')
             if not isinstance(self.__movie_path, list):
@@ -133,33 +149,8 @@ class FileTransfer:
                     self.__tv_season_rmt_format = tv_formats[1]
                 if len(tv_formats) > 2:
                     self.__tv_file_rmt_format = tv_formats[2]
-        # 转移模式
-        sync = config.get_config('sync')
-        if sync:
-            rmt_mode = sync.get('sync_mod')
-            if rmt_mode:
-                rmt_mode = rmt_mode.upper()
-            else:
-                rmt_mode = "COPY"
-            if rmt_mode == "LINK":
-                self.__sync_rmt_mode = RmtMode.LINK
-            elif rmt_mode == "SOFTLINK":
-                self.__sync_rmt_mode = RmtMode.SOFTLINK
-            else:
-                self.__sync_rmt_mode = RmtMode.COPY
-        pt = config.get_config('pt')
-        if pt:
-            rmt_mode = pt.get('rmt_mode')
-            if rmt_mode:
-                rmt_mode = rmt_mode.upper()
-            else:
-                rmt_mode = "COPY"
-            if rmt_mode == "LINK":
-                self.__pt_rmt_mode = RmtMode.LINK
-            elif rmt_mode == "SOFTLINK":
-                self.__pt_rmt_mode = RmtMode.SOFTLINK
-            else:
-                self.__pt_rmt_mode = RmtMode.COPY
+        rmt_mode = config.get_config('pt').get('rmt_mode')
+        self.__pt_rmt_mode = self.__sync_mode_dict.get(rmt_mode, RmtMode.COPY) if rmt_mode else RmtMode.COPY
 
     def __transfer_command(self, file_item, target_file, rmt_mode):
         """
@@ -175,15 +166,45 @@ class FileTransfer:
                     retcode = os.system('mklink /H "%s" "%s"' % (target_file, file_item))
                 elif rmt_mode == RmtMode.SOFTLINK:
                     retcode = os.system('mklink "%s" "%s"' % (target_file, file_item))
+                elif rmt_mode == RmtMode.MOVE:
+                    retcode = os.system('rename "%s" "%s"' % (file_item, os.path.basename(target_file)))
+                    if retcode != 0:
+                        return retcode
+                    retcode = os.system('move /Y "%s" "%s"' % (
+                        os.path.join(os.path.dirname(file_item), os.path.basename(target_file)), target_file))
+                elif rmt_mode == RmtMode.RCLONE or rmt_mode == RmtMode.RCLONECOPY:
+                    if target_file.startswith("/") or target_file.startswith("\\"):
+                        target_file = target_file[1:]
+                    if rmt_mode == RmtMode.RCLONE:
+                        retcode = os.system('rclone.exe moveto "%s" NASTOOL:"%s"' % (file_item, target_file))
+                    else:
+                        retcode = os.system('rclone.exe copyto "%s" NASTOOL:"%s"' % (file_item, target_file))
                 else:
                     retcode = os.system('copy /Y "%s" "%s"' % (file_item, target_file))
             else:
                 if rmt_mode == RmtMode.LINK:
-                    retcode = call(['ln', file_item, target_file])
+                    if platform.release().find("-z4-") >= 0:
+                        tmp = "%s/%s" % (os.path.dirname(os.path.dirname(target_file)), os.path.basename(target_file))
+                        retcode = os.system('ln "%s" "%s" ; mv "%s" "%s"' % (file_item, tmp, tmp, target_file))
+                    else:
+                        retcode = os.system('ln "%s" "%s"' % (file_item, target_file))
                 elif rmt_mode == RmtMode.SOFTLINK:
-                    retcode = call(['ln', '-s', file_item, target_file])
+                    retcode = os.system('ln -s "%s" "%s"' % (file_item, target_file))
+                elif rmt_mode == RmtMode.MOVE:
+                    tmp_file = os.path.join(os.path.dirname(file_item), os.path.basename(target_file))
+                    retcode = os.system('mv "%s" "%s"' % (file_item, tmp_file))
+                    if retcode != 0:
+                        return retcode
+                    retcode = os.system('mv "%s" "%s"' % (tmp_file, target_file))
+                elif rmt_mode == RmtMode.RCLONE or rmt_mode == RmtMode.RCLONECOPY:
+                    if target_file.startswith("/") or target_file.startswith("\\"):
+                        target_file = target_file[1:]
+                    if rmt_mode == RmtMode.RCLONE:
+                        retcode = os.system('rclone moveto "%s" NASTOOL:"%s"' % (file_item, target_file))
+                    else:
+                        retcode = os.system('rclone copyto "%s" NASTOOL:"%s"' % (file_item, target_file))
                 else:
-                    retcode = call(['cp', file_item, target_file])
+                    retcode = os.system('cp "%s" "%s"' % (file_item, target_file))
         finally:
             lock.release()
         return retcode
@@ -197,33 +218,41 @@ class FileTransfer:
         """
         dir_name = os.path.dirname(org_name)
         file_name = os.path.basename(org_name)
-        file_list = get_dir_files(dir_name, RMT_SUBEXT)
+        file_list = PathUtils.get_dir_level1_files(dir_name, RMT_SUBEXT)
         if len(file_list) == 0:
             log.debug("【RMT】%s 目录下没有找到字幕文件..." % dir_name)
         else:
             log.debug("【RMT】字幕文件清单：" + str(file_list))
-            find_flag = False
+            metainfo = MetaInfo(title=file_name)
             for file_item in file_list:
-                org_subname = os.path.splitext(org_name)[0]
-                if org_subname in file_item:
-                    find_flag = True
+                sub_metainfo = MetaInfo(title=os.path.basename(file_item))
+                if (sub_metainfo.cn_name and sub_metainfo.cn_name == metainfo.cn_name) \
+                        or (sub_metainfo.en_name and sub_metainfo.en_name == metainfo.en_name):
+                    if metainfo.get_season_string() and metainfo.get_season_string() != sub_metainfo.get_season_string():
+                        continue
+                    if metainfo.get_episode_string() and metainfo.get_episode_string() != sub_metainfo.get_episode_string():
+                        continue
                     file_ext = os.path.splitext(file_item)[-1]
-                    if file_item.find(".zh-cn" + file_ext) != -1:
+                    sub_language = os.path.basename(file_item).split(".")[-2]
+                    if sub_language and (sub_language.lower() in ["zh-cn", "zh", "zh_CN", "chs", "cht"]
+                                         or "简" in sub_language
+                                         or "中" in sub_language
+                                         or "双" in sub_language):
                         new_file = os.path.splitext(new_name)[0] + ".zh-cn" + file_ext
                     else:
                         new_file = os.path.splitext(new_name)[0] + file_ext
                     if not os.path.exists(new_file):
-                        log.debug("【RMT】正在处理字幕：%s" % file_name)
-                        retcode = self.__transfer_command(file_item, new_file, rmt_mode)
+                        log.debug("【RMT】正在处理字幕：%s" % os.path.basename(file_item))
+                        retcode = self.__transfer_command(file_item=file_item,
+                                                          target_file=new_file,
+                                                          rmt_mode=rmt_mode)
                         if retcode == 0:
-                            log.info("【RMT】字幕 %s %s完成" % (file_name, rmt_mode.value))
+                            log.info("【RMT】字幕 %s %s完成" % (os.path.basename(file_item), rmt_mode.value))
                         else:
                             log.error("【RMT】字幕 %s %s失败，错误码 %s" % (file_name, rmt_mode.value, str(retcode)))
                             return retcode
                     else:
                         log.info("【RMT】字幕 %s 已存在" % new_file)
-            if not find_flag:
-                log.debug("【RMT】没有相同文件名的字幕文件，不处理")
         return 0
 
     def __transfer_bluray_dir(self, file_path, new_path, rmt_mode):
@@ -235,7 +264,10 @@ class FileTransfer:
         """
         log.info("【RMT】正在%s目录：%s 到 %s" % (rmt_mode.value, file_path, new_path))
         # 复制
-        retcode = self.__transfer_dir_files(file_path, new_path, rmt_mode, True)
+        retcode = self.__transfer_dir_files(src_dir=file_path,
+                                            target_dir=new_path,
+                                            rmt_mode=rmt_mode,
+                                            bludir=True)
         if retcode == 0:
             log.info("【RMT】文件 %s %s完成" % (file_path, rmt_mode.value))
         else:
@@ -251,16 +283,16 @@ class FileTransfer:
         if not path:
             return False
         for tv_path in self.__tv_path:
-            if is_path_in_path(tv_path, path):
+            if PathUtils.is_path_in_path(tv_path, path):
                 return True
         for movie_path in self.__movie_path:
-            if is_path_in_path(movie_path, path):
+            if PathUtils.is_path_in_path(movie_path, path):
                 return True
         for anime_path in self.__anime_path:
-            if is_path_in_path(anime_path, path):
+            if PathUtils.is_path_in_path(anime_path, path):
                 return True
         for unknown_path in self.__unknown_path:
-            if is_path_in_path(unknown_path, path):
+            if PathUtils.is_path_in_path(unknown_path, path):
                 return True
         return False
 
@@ -272,7 +304,7 @@ class FileTransfer:
         :param rmt_mode: RmtMode转移方式
         :param bludir: 是否蓝光目录
         """
-        file_list = get_dir_files(src_dir)
+        file_list = PathUtils.get_dir_files(src_dir)
         retcode = 0
         for file in file_list:
             new_file = file.replace(src_dir, target_dir)
@@ -282,7 +314,9 @@ class FileTransfer:
             new_dir = os.path.dirname(new_file)
             if not os.path.exists(new_dir):
                 os.makedirs(new_dir)
-            retcode = self.__transfer_command(file, new_file, rmt_mode)
+            retcode = self.__transfer_command(file_item=file,
+                                              target_file=new_file,
+                                              rmt_mode=rmt_mode)
             if retcode != 0:
                 break
             else:
@@ -313,14 +347,18 @@ class FileTransfer:
         # 目录
         if os.path.isdir(file_item):
             log.info("【RMT】正在%s目录：%s 到 %s" % (rmt_mode.value, file_item, target_dir))
-            retcode = self.__transfer_dir_files(file_item, target_dir, rmt_mode)
+            retcode = self.__transfer_dir_files(src_dir=file_item,
+                                                target_dir=target_dir,
+                                                rmt_mode=rmt_mode)
         # 文件
         else:
             target_file = os.path.join(target_dir, os.path.basename(file_item))
             if os.path.exists(target_file):
                 log.warn("【RMT】%s 文件已存在" % target_file)
                 return 0
-            retcode = self.__transfer_command(file_item, target_file, rmt_mode)
+            retcode = self.__transfer_command(file_item=file_item,
+                                              target_file=target_file,
+                                              rmt_mode=rmt_mode)
             if retcode == 0:
                 insert_transfer_blacklist(file_item)
         if retcode == 0:
@@ -338,15 +376,16 @@ class FileTransfer:
         :param over_flag: 是否覆盖，为True时会先删除再转移
         """
         file_name = os.path.basename(file_item)
-        new_file_name = os.path.basename(new_file)
         if not over_flag and os.path.exists(new_file):
-            log.warn("【RMT】文件已存在：%s" % new_file_name)
+            log.warn("【RMT】文件已存在：%s" % new_file)
             return 0
         if over_flag and os.path.isfile(new_file):
-            log.info("【RMT】正在删除已存在的文件：%s" % new_file_name)
+            log.info("【RMT】正在删除已存在的文件：%s" % new_file)
             os.remove(new_file)
-        log.info("【RMT】正在转移文件：%s 到 %s" % (file_name, new_file_name))
-        retcode = self.__transfer_command(file_item, new_file, rmt_mode)
+        log.info("【RMT】正在转移文件：%s 到 %s" % (file_name, new_file))
+        retcode = self.__transfer_command(file_item=file_item,
+                                          target_file=new_file,
+                                          rmt_mode=rmt_mode)
         if retcode == 0:
             log.info("【RMT】文件 %s %s完成" % (file_name, rmt_mode.value))
             insert_transfer_blacklist(file_item)
@@ -354,7 +393,9 @@ class FileTransfer:
             log.error("【RMT】文件 %s %s失败，错误码 %s" % (file_name, rmt_mode.value, str(retcode)))
             return retcode
         # 处理字幕
-        return self.__transfer_subtitles(file_item, new_file, rmt_mode)
+        return self.__transfer_subtitles(org_name=file_item,
+                                         new_name=new_file,
+                                         rmt_mode=rmt_mode)
 
     def transfer_media(self,
                        in_from: Enum,
@@ -362,6 +403,7 @@ class FileTransfer:
                        files: list = None,
                        target_dir=None,
                        unknown_dir=None,
+                       sync_transfer_mode=None,
                        tmdb_info=None,
                        media_type: MediaType = None,
                        season=None,
@@ -375,6 +417,7 @@ class FileTransfer:
         :param files: 文件清单，非空时以该文件清单为准，为空时从in_path中按后缀和大小限制检索需要处理的文件清单
         :param target_dir: 目的文件夹，非空的转移到该文件夹，为空时则按类型转移到配置文件中的媒体库文件夹
         :param unknown_dir: 未识别文件夹，非空时未识别的媒体文件转移到该文件夹，为空时则使用配置文件中的未识别文件夹
+        :param sync_transfer_mode: 文件转移方式，为空时则使用下载器转移方式
         :param tmdb_info: 手动识别转移时传入的TMDB信息对象，如未输入，则按名称笔TMDB实时查询
         :param media_type: 手动识别转移时传入的文件类型，如未输入，则自动识别
         :param season: 手动识别目录或文件时传入的的字号，如未输入，则自动识别
@@ -391,9 +434,11 @@ class FileTransfer:
         if in_from in DownloaderType:
             rmt_mode = self.__pt_rmt_mode
         else:
-            rmt_mode = self.__sync_rmt_mode
-
-        log.info("【RMT】开始处理：%s" % in_path)
+            if sync_transfer_mode:
+                rmt_mode = sync_transfer_mode
+            else:
+                rmt_mode = self.__pt_rmt_mode
+        log.info("【RMT】开始处理：%s，转移方式：%s" % (in_path, rmt_mode.value))
 
         success_flag = True
         error_message = ""
@@ -405,10 +450,10 @@ class FileTransfer:
                     log.error("【RMT】文件转移失败，目录不存在 %s" % in_path)
                     return False, "目录不存在"
                 # 回收站及隐藏的文件不处理
-                if is_invalid_path(in_path):
+                if PathUtils.is_invalid_path(in_path):
                     return False, "回收站或者隐藏文件夹"
                 # 判断是不是原盘文件夹
-                bluray_disk_flag = is_bluray_dir(in_path)
+                bluray_disk_flag = PathUtils.is_bluray_dir(in_path)
                 # 开始处理里面的文件
                 if bluray_disk_flag:
                     file_list = [os.path.dirname(in_path)] if os.path.normpath(in_path).endswith("BDMV") else [in_path]
@@ -416,19 +461,20 @@ class FileTransfer:
                 else:
                     if udf_flag:
                         # 自定义转移时未输入大小限制默认不限制
-                        now_filesize = 0 if not min_filesize or not min_filesize.isdigit() else int(
+                        now_filesize = 0 if not str(min_filesize).isdigit() else int(
                             min_filesize) * 1024 * 1024
                     else:
                         # 未输入大小限制默认为配置大小限制
-                        now_filesize = self.__min_filesize if not min_filesize or not min_filesize.isdigit() else int(
+                        now_filesize = self.__min_filesize if not str(min_filesize).isdigit() else int(
                             min_filesize) * 1024 * 1024
                     # 查找目录下的文件
-                    file_list = get_dir_files(in_path=in_path, episode_format=episode[0], exts=RMT_MEDIAEXT,
-                                              filesize=now_filesize)
+                    file_list = PathUtils.get_dir_files(in_path=in_path, episode_format=episode[0], exts=RMT_MEDIAEXT,
+                                                        filesize=now_filesize)
                     log.debug("【RMT】文件清单：" + str(file_list))
                     if len(file_list) == 0:
-                        log.warn("【RMT】%s 目录下未找到媒体文件，当前最小文件大小限制为 %s" % (in_path, str_filesize(now_filesize)))
-                        return False, "目录下未找到媒体文件，当前最小文件大小限制为 %s" % str_filesize(now_filesize)
+                        log.warn(
+                            "【RMT】%s 目录下未找到媒体文件，当前最小文件大小限制为 %s" % (in_path, StringUtils.str_filesize(now_filesize)))
+                        return False, "目录下未找到媒体文件，当前最小文件大小限制为 %s" % StringUtils.str_filesize(now_filesize)
             # 传入的是个文件
             else:
                 if not os.path.exists(in_path):
@@ -442,12 +488,12 @@ class FileTransfer:
             # 传入的是个文件列表，这些文失件是in_path下面的文件
             file_list = files
 
-        # 非手动模式下，过滤掉文件列表中已处理过的
-        if in_from != SyncType.MAN:
+        # 目录同步模式下，过滤掉文件列表中已处理过的
+        if in_from == SyncType.MON:
             file_list = list(filter(is_transfer_notin_blacklist, file_list))
             if not file_list:
-                log.info("【RMT】所有文件均已成功转移过，没有需要处理的文件")
-                return True, "没有需要处理的文件"
+                log.info("【RMT】所有文件均已成功转移过，没有需要处理的文件！如需重新处理，请清理缓存（服务->清理转移缓存）")
+                return True, "没有新文件需要处理"
         # API检索出媒体信息，传入一个文件列表，得出每一个文件的名称，这里是当前目录下所有的文件了
         Medias = self.media.get_media_info_on_files(file_list, tmdb_info, media_type, season, episode[0])
         if not Medias:
@@ -499,13 +545,13 @@ class FileTransfer:
                     # 原样转移过去
                     if unknown_dir:
                         log.warn("【RMT】%s 按原文件名转移到unknown目录：%s" % (file_name, unknown_dir))
-                        self.__transfer_origin_file(file_item, unknown_dir, rmt_mode)
+                        self.__transfer_origin_file(file_item=file_item, target_dir=unknown_dir, rmt_mode=rmt_mode)
                     elif self.__unknown_path:
                         unknown_path = self.__get_best_unknown_path(in_path)
                         if not unknown_path:
                             continue
                         log.warn("【RMT】%s 按原文件名转移到unknown目录：%s" % (file_name, unknown_path))
-                        self.__transfer_origin_file(file_item, unknown_path, rmt_mode)
+                        self.__transfer_origin_file(file_item=file_item, target_dir=unknown_path, rmt_mode=rmt_mode)
                     else:
                         log.error("【RMT】%s 无法识别媒体信息！" % file_name)
                     continue
@@ -523,7 +569,7 @@ class FileTransfer:
                     failed_count += 1
                     alert_count += 1
                     continue
-                if not os.path.exists(dist_path):
+                if dist_path and not os.path.exists(dist_path):
                     return False, "目录不存在：%s" % dist_path
 
                 # 判断文件是否已存在，返回：目录存在标志、目录名、文件存在标志、文件名
@@ -546,7 +592,10 @@ class FileTransfer:
                         if rmt_mode != RmtMode.SOFTLINK:
                             if media.size > os.path.getsize(ret_file_path) and self.__filesize_cover or udf_flag:
                                 log.info("【RMT】文件 %s 已存在，覆盖..." % ret_file_path)
-                                ret = self.__transfer_file(file_item, ret_file_path, rmt_mode, True)
+                                ret = self.__transfer_file(file_item=file_item,
+                                                           new_file=ret_file_path,
+                                                           rmt_mode=rmt_mode,
+                                                           over_flag=True)
                                 if ret != 0:
                                     success_flag = False
                                     error_message = "文件转移失败，错误码 %s" % ret
@@ -608,7 +657,10 @@ class FileTransfer:
                             alert_count += 1
                             continue
                         new_file = "%s%s" % (ret_file_path, file_ext)
-                        ret = self.__transfer_file(file_item, new_file, rmt_mode, False)
+                        ret = self.__transfer_file(file_item=file_item,
+                                                   new_file=new_file,
+                                                   rmt_mode=rmt_mode,
+                                                   over_flag=False)
                         if ret != 0:
                             success_flag = False
                             error_message = "文件转移失败，错误码 %s" % ret
@@ -619,7 +671,7 @@ class FileTransfer:
                             continue
                 # 媒体库刷新条目：类型-类别-标题-年份
                 refresh_item = {"type": media.type, "category": media.category, "title": media.title,
-                                "year": media.year}
+                                "year": media.year, "target_path": dist_path}
                 # 登记媒体库刷新
                 if refresh_item not in refresh_library_items:
                     refresh_library_items.append(refresh_item)
@@ -656,6 +708,9 @@ class FileTransfer:
                 # 生成nfo及poster
                 if self.__nfo_poster:
                     self.nfohelper.gen_nfo_files(media, ret_dir_path, os.path.basename(ret_file_path))
+                # 移动模式随机休眠（兼容一些网盘挂载目录）
+                if rmt_mode == RmtMode.MOVE:
+                    sleep(round(random.uniform(0, 1), 1))
 
             except Exception as err:
                 log.error("【RMT】文件转移时发生错误：%s - %s" % (str(err), traceback.format_exc()))
@@ -664,7 +719,7 @@ class FileTransfer:
         if message_medias:
             self.message.send_transfer_tv_message(message_medias, in_from)
         # 刷新媒体库
-        if refresh_library_items:
+        if refresh_library_items and self.__refresh_mediaserver:
             self.mediaserver.refresh_library_by_items(refresh_library_items)
         # 启新进程下载字幕
         if download_subtitle_items:
@@ -673,13 +728,22 @@ class FileTransfer:
         log.info("【RMT】%s 处理完成，总数：%s，失败：%s" % (in_path, total_count, failed_count))
         if alert_count > 0:
             self.message.sendmsg(title="%s 有 %s 个文件转移失败，请登录NASTool查看" % (in_path, alert_count))
+        else:
+            # 删除空目录
+            if rmt_mode == RmtMode.MOVE \
+                    and os.path.exists(in_path) \
+                    and os.path.isdir(in_path) \
+                    and not PathUtils.get_dir_files(in_path=in_path, exts=RMT_MEDIAEXT):
+                log.info("【RMT】目录下已无媒体文件，移动模式下删除目录：%s" % in_path)
+                shutil.rmtree(in_path)
         return success_flag, error_message
 
-    def transfer_manually(self, s_path, t_path):
+    def transfer_manually(self, s_path, t_path, mode):
         """
         全量转移，用于使用命令调用
         :param s_path: 源目录
         :param t_path: 目的目录
+        :param mode: 转移方式
         """
         if not s_path:
             return
@@ -690,12 +754,19 @@ class FileTransfer:
             if not os.path.exists(t_path):
                 print("【RMT】目的目录不存在：%s" % t_path)
                 return
+        rmt_mode = self.__sync_mode_dict.get(mode)
+        if not rmt_mode:
+            print("【RMT】转移模式错误！")
+            return
+        print("【RMT】转移模式为：%s" % rmt_mode.value)
         print("【RMT】正在转移以下目录中的全量文件：%s" % s_path)
-        print("【RMT】转移模式为：%s" % self.__sync_rmt_mode.value)
-        for path in get_dir_level1_medias(s_path, RMT_MEDIAEXT):
-            if is_invalid_path(path):
+        for path in PathUtils.get_dir_level1_medias(s_path, RMT_MEDIAEXT):
+            if PathUtils.is_invalid_path(path):
                 continue
-            ret, ret_msg = self.transfer_media(in_from=SyncType.MAN, in_path=path, target_dir=t_path)
+            ret, ret_msg = self.transfer_media(in_from=SyncType.MAN,
+                                               in_path=path,
+                                               target_dir=t_path,
+                                               sync_transfer_mode=rmt_mode)
             if not ret:
                 print("【RMT】%s 处理失败：%s" % (path, ret_msg))
 
@@ -785,36 +856,33 @@ class FileTransfer:
         :param item_path: 文件路径
         """
         if not item_path:
-            return False, None
+            return False
         if not self.__movie_category_flag or not self.__movie_path:
-            return False, None
+            return False
         if os.path.isdir(item_path):
             movie_dir = item_path
         else:
             movie_dir = os.path.dirname(item_path)
-        # 判断是不是电影目录的子目录
-        movie_dir_flag = False
-        for movie_path in self.__movie_path:
-            if movie_dir.count(movie_path):
-                movie_dir_flag = True
-                break
-        if not movie_dir_flag:
-            return False, None
         # 已经是精选下的不处理
-        org_type = os.path.basename(os.path.dirname(movie_dir))
-        if org_type == RMT_FAVTYPE:
-            return False, None
+        movie_type = os.path.basename(os.path.dirname(movie_dir))
+        if movie_type == RMT_FAVTYPE:
+            return False
+        movie_name = os.path.basename(movie_dir)
+        movie_path = self.__get_best_target_path(mtype=MediaType.MOVIE, in_path=movie_dir)
         # 开始转移文件，转移到同目录下的精选目录
-        new_path = os.path.join(os.path.dirname(os.path.dirname(movie_dir)), RMT_FAVTYPE, os.path.basename(movie_dir))
-        log.info("【EMBY】开始转移文件 %s 到 %s ..." % (movie_dir, new_path))
-        if os.path.exists(new_path):
-            log.info("【EMBY】目录 %s 已存在" % new_path)
-            return False, None
-        ret = call(['mv', movie_dir, new_path])
-        if ret == 0:
-            return True, org_type
+        org_path = os.path.join(movie_path, movie_type, movie_name)
+        new_path = os.path.join(movie_path, RMT_FAVTYPE, movie_name)
+        if os.path.exists(org_path):
+            log.info("【RMT】开始转移文件 %s 到 %s ..." % (org_path, new_path))
+            if os.path.exists(new_path):
+                log.info("【RMT】目录 %s 已存在" % new_path)
+                return False
+            ret = os.system('mv "%s" "%s"' % (org_path, new_path))
+            if ret == 0:
+                return True
         else:
-            return False, None
+            log.info("【RMT】%s 目录不存在" % org_path)
+        return False
 
     def get_dest_path_by_info(self, dest, meta_info: MetaBase):
         """
@@ -851,13 +919,13 @@ class FileTransfer:
             for dest_path in self.__movie_path:
                 # 判断精选
                 fav_path = os.path.join(dest_path, RMT_FAVTYPE, dir_name)
-                fav_files = get_dir_files(fav_path, RMT_MEDIAEXT)
+                fav_files = PathUtils.get_dir_files(fav_path, RMT_MEDIAEXT)
                 # 其它分类
                 if self.__movie_category_flag:
                     dest_path = os.path.join(dest_path, meta_info.category, dir_name)
                 else:
                     dest_path = os.path.join(dest_path, dir_name)
-                files = get_dir_files(dest_path, RMT_MEDIAEXT)
+                files = PathUtils.get_dir_files(dest_path, RMT_MEDIAEXT)
                 if len(files) > 0 or len(fav_files) > 0:
                     return [{'title': meta_info.title, 'year': meta_info.year}]
             return []
@@ -884,7 +952,7 @@ class FileTransfer:
                 # 目录不存在
                 if not os.path.exists(dest_path):
                     continue
-                files = get_dir_files(dest_path, RMT_MEDIAEXT)
+                files = PathUtils.get_dir_files(dest_path, RMT_MEDIAEXT)
                 for file in files:
                     file_meta_info = MetaInfo(os.path.basename(file))
                     if not file_meta_info.get_season_list() or not file_meta_info.get_episode_list():
@@ -919,13 +987,24 @@ class FileTransfer:
             return dest_paths[0]
         # 有输入路径的，匹配有共同上级路径的
         if in_path:
-            for path in dest_paths:
-                if os.path.commonpath([path, in_path]) not in ["/", "\\"]:
-                    return path
+            # 先用自定义规则匹配 找同级目录最多的路径
+            max_return_path = None
+            max_path_len = 0
+            for dest_path in dest_paths:
+                try:
+                    path_len = len(os.path.commonpath([in_path, dest_path]))
+                    if path_len > max_path_len:
+                        max_path_len = path_len
+                        max_return_path = dest_path
+                except Exception as err:
+                    print(str(err))
+                    continue
+            if max_return_path:
+                return max_return_path
         # 有输入大小的，匹配第1个满足空间存储要求的
         if size:
             for path in dest_paths:
-                disk_free_size = get_free_space_gb(path)
+                disk_free_size = SystemUtils.get_free_space_gb(path)
                 if float(disk_free_size) > float(size / 1024 / 1024 / 1024):
                     return path
         # 默认返回第1个
@@ -943,24 +1022,22 @@ class FileTransfer:
                 return unknown_path
         return self.__unknown_path[0]
 
-    def link_sync_files(self, in_from, src_path, in_file, target_dir):
+    def link_sync_files(self, src_path, in_file, target_dir, sync_transfer_mode):
         """
         对文件做纯链接处理，不做识别重命名，则监控模块调用
-        :param in_from: 来源渠道
+        :param : 来源渠道
         :param src_path: 源目录
         :param in_file: 源文件
         :param target_dir: 目的目录
+        :param sync_transfer_mode: 明确的转移方式
         """
-        # 转移模式
-        if in_from in DownloaderType:
-            rmt_mode = self.__pt_rmt_mode
-        else:
-            rmt_mode = self.__sync_rmt_mode
         new_file = in_file.replace(src_path, target_dir)
         new_dir = os.path.dirname(new_file)
         if not os.path.exists(new_dir):
             os.makedirs(new_dir)
-        return self.__transfer_command(in_file, new_file, rmt_mode)
+        return self.__transfer_command(file_item=in_file,
+                                       target_file=new_file,
+                                       rmt_mode=sync_transfer_mode)
 
     @staticmethod
     def get_format_dict(media: MetaBase):
@@ -970,7 +1047,10 @@ class FileTransfer:
         if not media:
             return {}
         return {
-            "title": media.title,
+            "title": str(media.title).replace("/", "") if media.title else None,
+            "en_title": str(media.en_name).replace("/", "") if media.en_name else None,
+            "original_name": os.path.splitext(media.org_string)[0] if media.org_string else None,
+            "original_title": str(media.original_title).replace("/", "") if media.original_title else None,
             "year": media.year,
             "edition": media.resource_type,
             "videoFormat": media.resource_pix,
@@ -1009,7 +1089,9 @@ if __name__ == "__main__":
     """
     手工转移时，使用命名行调用
     """
-    parser = argparse.ArgumentParser(description='Rename Media Tool')
+    parser = argparse.ArgumentParser(description='文件转移工具')
+    parser.add_argument('-m', '--mode', dest='mode', required=True,
+                        help='转移模式：link copy softlink move rclone rclonecopy')
     parser.add_argument('-s', '--source', dest='s_path', required=True, help='硬链接源目录路径')
     parser.add_argument('-d', '--target', dest='t_path', required=False, help='硬链接目的目录路径')
     args = parser.parse_args()
@@ -1020,6 +1102,6 @@ if __name__ == "__main__":
             print("【RMT】目的目录路径：%s" % args.t_path)
         else:
             print("【RMT】目的目录为配置文件中的电影、电视剧媒体库目录")
-        FileTransfer().transfer_manually(args.s_path, args.t_path)
+        FileTransfer().transfer_manually(args.s_path, args.t_path, args.mode)
     else:
         print("【RMT】未设置环境变量，请先设置 NASTOOL_CONFIG 环境变量为配置文件地址")

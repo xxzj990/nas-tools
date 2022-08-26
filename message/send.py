@@ -4,12 +4,15 @@ from enum import Enum
 import log
 from config import Config
 from message.channel.bark import Bark
+from message.channel.iyuu import IyuuMsg
+from message.channel.pushplus import PushPlus
 from message.channel.serverchan import ServerChan
 from message.channel.telegram import Telegram
 from message.channel.wechat import WeChat
 from rmt.meta.metabase import MetaBase
-from utils.functions import str_filesize
-from utils.sqls import insert_system_message, insert_download_history
+from utils.sqls import insert_download_history
+from utils.string_utils import StringUtils
+from utils.sysmsg_helper import MessageCenter
 from utils.types import SearchType, MediaType
 
 
@@ -18,9 +21,11 @@ class Message:
     __webhook_ignore = None
     __domain = None
     client = None
+    messagecenter = None
 
     def __init__(self):
         self.init_config()
+        self.messagecenter = MessageCenter()
         if self.__msg_channel == "wechat":
             self.client = WeChat()
         elif self.__msg_channel == "serverchan":
@@ -29,6 +34,10 @@ class Message:
             self.client = Telegram()
         elif self.__msg_channel == "bark":
             self.client = Bark()
+        elif self.__msg_channel == "pushplus":
+            self.client = PushPlus()
+        elif self.__msg_channel == "iyuu":
+            self.client = IyuuMsg()
 
     def init_config(self):
         config = Config()
@@ -69,7 +78,7 @@ class Message:
                 url = self.__domain
         else:
             url = ""
-        insert_system_message(level="INFO", title=title, content=text)
+        self.messagecenter.insert_system_message(level="INFO", title=title, content=text)
         state, ret_msg = self.client.send_msg(title, text, image, url, user_id)
         if not state:
             log.error("【MSG】发送消息失败：%s" % ret_msg)
@@ -115,7 +124,7 @@ class Message:
         if channel == SearchType.TG:
             state, ret_msg = Telegram().send_list_msg(title, medias, user_id)
         elif channel == SearchType.WX:
-            WeChat().send_msg(title)
+            WeChat().send_msg(title, user_id=user_id)
             state, ret_msg = WeChat().send_list_msg(medias, self.__domain, user_id)
         else:
             return False
@@ -138,7 +147,7 @@ class Message:
             msg_text = f"{msg_text}\n质量：{can_item.get_resource_type_string()}"
         if can_item.size:
             if str(can_item.size).isdigit():
-                size = str_filesize(can_item.size)
+                size = StringUtils.str_filesize(can_item.size)
             else:
                 size = can_item.size
             msg_text = f"{msg_text}\n大小：{size}"
@@ -147,6 +156,8 @@ class Message:
         if can_item.seeders:
             msg_text = f"{msg_text}\n做种数：{can_item.seeders}"
         msg_text = f"{msg_text}\n促销：{can_item.get_volume_factor_string()}"
+        if can_item.hit_and_run:
+            msg_text = f"{msg_text}\nHit&Run：是"
         if can_item.description:
             html_re = re.compile(r'<[^>]+>', re.S)
             description = html_re.sub('', can_item.description)
@@ -176,7 +187,7 @@ class Message:
                 msg_str = f"{msg_str}，类别：{media_info.category}"
         if media_info.get_resource_type_string():
             msg_str = f"{msg_str}，质量：{media_info.get_resource_type_string()}"
-        msg_str = f"{msg_str}，大小：{str_filesize(media_info.size)}，来自：{in_from.value}"
+        msg_str = f"{msg_str}，大小：{StringUtils.str_filesize(media_info.size)}，来自：{in_from.value}"
         if exist_filenum != 0:
             msg_str = f"{msg_str}，{exist_filenum}个文件已存在"
         self.sendmsg(title=msg_title, text=msg_str, image=media_info.get_message_image(), url='history')
@@ -197,9 +208,9 @@ class Message:
             if item_info.category:
                 msg_str = f"{msg_str}，类别：{item_info.category}"
             if item_info.total_episodes == 1:
-                msg_str = f"{msg_str}，大小：{str_filesize(item_info.size)}，来自：{in_from.value}"
+                msg_str = f"{msg_str}，大小：{StringUtils.str_filesize(item_info.size)}，来自：{in_from.value}"
             else:
-                msg_str = f"{msg_str}，共{item_info.total_episodes}集，总大小：{str_filesize(item_info.size)}，来自：{in_from.value}"
+                msg_str = f"{msg_str}，共{item_info.total_episodes}集，总大小：{StringUtils.str_filesize(item_info.size)}，来自：{in_from.value}"
             self.sendmsg(title=msg_title, text=msg_str, image=item_info.get_message_image(), url='history')
 
     def send_download_fail_message(self, item: MetaBase, error_msg):

@@ -1,10 +1,10 @@
+import log
 from config import Config
 from message.channel.channel import IMessageChannel
 from utils.http_utils import RequestUtils
 
 
 class Bark(IMessageChannel):
-
     __server = None
     __apikey = None
 
@@ -23,6 +23,8 @@ class Bark(IMessageChannel):
         测试连通性
         """
         flag, msg = self.send_msg("测试", "这是一条测试消息")
+        if not flag:
+            log.error("【MSG】发送消息失败：%s" % msg)
         return flag
 
     def send_msg(self, title, text="", image="", url="", user_id=""):

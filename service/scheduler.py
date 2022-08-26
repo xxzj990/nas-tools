@@ -1,15 +1,21 @@
+import math
+import random
+from datetime import datetime
+
 from apscheduler.schedulers.background import BackgroundScheduler
+
 import log
 from config import AUTO_REMOVE_TORRENTS_INTERVAL, PT_TRANSFER_INTERVAL, Config, METAINFO_SAVE_INTERVAL, \
     RELOAD_CONFIG_INTERVAL, SYNC_TRANSFER_INTERVAL, RSS_CHECK_INTERVAL, REFRESH_PT_DATA_INTERVAL, \
-    RSS_DOUBAN_TO_TMDB_INTERVAL
+    RSS_REFRESH_TMDB_INTERVAL, META_DELETE_UNKNOWN_INTERVAL, REFRESH_WALLPAPER_INTERVAL
 from pt.douban import DouBan
 from pt.downloader import Downloader
 from pt.rss import Rss
 from pt.sites import Sites
 from service.sync import Sync
-from utils.functions import singleton
+from utils.commons import singleton
 from utils.meta_helper import MetaHelper
+from web.backend.web_utils import get_login_wallpaper
 
 
 @singleton
@@ -34,47 +40,71 @@ class Scheduler:
         if not self.SCHEDULER:
             return
         if self.__pt:
-            # PT种子清理
+            # 种子清理
             pt_seeding_time = self.__pt.get('pt_seeding_time')
             if pt_seeding_time:
                 self.SCHEDULER.add_job(Downloader().pt_removetorrents,
                                        'interval',
                                        seconds=AUTO_REMOVE_TORRENTS_INTERVAL)
-                log.info("【RUN】PT下载自动删种服务启动...")
+                log.info("【RUN】下载器自动删种服务启动...")
 
-            # PT站签到
+            # 站点签到
             ptsignin_cron = str(self.__pt.get('ptsignin_cron'))
             if ptsignin_cron:
-                if ptsignin_cron.find(':') != -1:
+                if '-' in ptsignin_cron:
+                    try:
+                        time_range = ptsignin_cron.split("-")
+                        start_time_range_str = time_range[0]
+                        end_time_range_str = time_range[1]
+                        start_time_range_array = start_time_range_str.split(":")
+                        end_time_range_array = end_time_range_str.split(":")
+                        start_hour = int(start_time_range_array[0]) or 1
+                        start_minute = int(start_time_range_array[1]) or 1
+                        end_hour = int(end_time_range_array[0]) or 1
+                        end_minute = int(end_time_range_array[1]) or 1
+
+                        def start_random_job():
+                            task_time_count = random.randint(start_hour * 60 + start_minute, end_hour * 60 + end_minute)
+                            self.start_data_site_signin_job(math.floor(task_time_count / 60), task_time_count % 60)
+
+                        self.SCHEDULER.add_job(start_random_job,
+                                               "cron",
+                                               hour=start_hour,
+                                               minute=start_minute)
+                        log.info("【RUN】站点自动签到服务时间范围随机模式启动，起始时间于%s:%s" % (
+                            str(start_hour).rjust(2, '0'), str(start_minute).rjust(2, '0')))
+                    except Exception as e:
+                        log.info("【RUN】站点自动签到时间 时间范围随机模式 配置格式错误：%s %s" % (ptsignin_cron, str(e)))
+                elif ptsignin_cron.find(':') != -1:
                     try:
                         hour = int(ptsignin_cron.split(":")[0]) or 1
                         minute = int(ptsignin_cron.split(":")[1]) or 1
                     except Exception as e:
-                        log.info("【RUN】PT站自动签到时间 配置格式错误：%s" % str(e))
+                        log.info("【RUN】站点自动签到时间 配置格式错误：%s" % str(e))
                         hour = minute = 0
                     if hour and minute:
                         self.SCHEDULER.add_job(Sites().signin,
                                                "cron",
                                                hour=hour,
                                                minute=minute)
-                        log.info("【RUN】PT站自动签到服务启动...")
+                        log.info("【RUN】站点自动签到服务启动...")
                 else:
                     try:
                         hours = float(ptsignin_cron)
                     except Exception as e:
-                        log.info("【RUN】PT站自动签到时间 配置格式错误：%s" % str(e))
+                        log.info("【RUN】站点自动签到时间 配置格式错误：%s" % str(e))
                         hours = 0
                     if hours:
                         self.SCHEDULER.add_job(Sites().signin,
                                                "interval",
                                                hours=hours)
-                        log.info("【RUN】PT站自动签到服务启动...")
+                        log.info("【RUN】站点自动签到服务启动...")
 
-            # PT文件转移
+            # 下载文件转移
             pt_monitor = self.__pt.get('pt_monitor')
             if pt_monitor:
                 self.SCHEDULER.add_job(Downloader().pt_transfer, 'interval', seconds=PT_TRANSFER_INTERVAL)
-                log.info("【RUN】PT下载文件转移服务启动...")
+                log.info("【RUN】下载文件转移服务启动...")
 
             # RSS下载器
             pt_check_interval = self.__pt.get('pt_check_interval')
@@ -135,11 +165,17 @@ class Scheduler:
         # RSS队列中检索
         self.SCHEDULER.add_job(Rss().rsssearch, 'interval', seconds=RSS_CHECK_INTERVAL)
 
-        # PT站数据刷新
+        # 站点数据刷新
         self.SCHEDULER.add_job(Sites().refresh_pt_date_now, 'interval', hours=REFRESH_PT_DATA_INTERVAL)
 
-        # 豆瓣RSS转TMDB
-        self.SCHEDULER.add_job(Rss().rssdouban_to_tmdb, 'interval', hours=RSS_DOUBAN_TO_TMDB_INTERVAL)
+        # 豆瓣RSS转TMDB，定时更新TMDB数据
+        self.SCHEDULER.add_job(Rss().refresh_rss_metainfo, 'interval', hours=RSS_REFRESH_TMDB_INTERVAL)
+
+        # 定时清除未识别的缓存
+        self.SCHEDULER.add_job(MetaHelper().delete_unknown_meta, 'interval', hours=META_DELETE_UNKNOWN_INTERVAL)
+
+        # 定时刷新壁纸
+        self.SCHEDULER.add_job(get_login_wallpaper, 'interval', hours=REFRESH_WALLPAPER_INTERVAL)
 
         self.SCHEDULER.print_jobs()
 
@@ -156,3 +192,22 @@ class Scheduler:
                 self.SCHEDULER = None
         except Exception as e:
             print(str(e))
+
+    def start_data_site_signin_job(self, hour, minute):
+        year = datetime.now().year
+        month = datetime.now().month
+        day = datetime.now().day
+        # 随机数从1秒开始，不在整点签到
+        second = random.randint(1, 59)
+        log.info("【RUN】站点自动签到时间 即将在%s-%s-%s,%s:%s:%s签到" % (
+            str(year), str(month), str(day), str(hour), str(minute), str(second)))
+        if hour < 0 or hour > 24:
+            hour = -1
+        if minute < 0 or minute > 60:
+            minute = -1
+        if hour < 0 or minute < 0:
+            log.warn("【RUN】站点自动签到时间 配置格式错误：不启动任务")
+            return
+        self.SCHEDULER.add_job(Sites().signin,
+                               "date",
+                               run_date=datetime(year, month, day, hour, minute, second))

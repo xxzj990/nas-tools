@@ -15,8 +15,8 @@
           <div class="input-group">
             <input id="search_word" class="form-control" type="text" value="" placeholder="电影/电视剧名称">
             <button id="search_btn" class="btn btn-primary d-none d-sm-inline-block"
-              onclick="javascript:navmenu('medialist?s='+$('#search_word').val()+'&f=1&t=search')">搜索</button>
-            <button id="search_icon" onclick="javascript:navmenu('medialist?s='+$('#search_word').val()+'&f=1&t=search')" class="btn btn-primary d-sm-none btn-icon">
+              onclick="javascript:search_media_list()">搜索</button>
+            <button id="search_icon" onclick="javascript:search_media_list()" class="btn btn-primary d-sm-none btn-icon">
               <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-search" width="24" height="24"
                 viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round"
                 stroke-linejoin="round">
@@ -219,11 +219,12 @@
                   <input type="hidden" name="media_card_spstate" value="{{ Item[19] }} {{ Item[20] }}">
                   <input type="hidden" name="media_card_title" value="{{ Item[1] }}">
                   <div>
-                    <div><a
+                    <div>
+                      <a
                         href='{% if not Item[9] %}javascript:show_download_modal("{{ Item[0] }}","{{ Item[13] }}"){% else %}javascript:show_download_modal("{{ Item[0] }}","{{ Item[1] }}"){% endif %}'
                         title="点击添加下载">
                       <strong>{% if Item[14] or not Item[13] %}{{ Item[1]|replace("()", "") }}{% else %} {{ Item[13] }} {% endif %}</strong></a>
-                      <span class="badge ms-2">{{ Item[4] }}</span>
+                      <span class="badge ms-2">{{ Item[4] }}{{ UPCHAR }}</span>
                         {% if Item[19] != 1.0 %}
                             <span class="badge text-white bg-azure">{{ (Item[19] * 100) | int }}%UL</span>
                         {% endif %}
@@ -400,6 +401,39 @@
     </div>
   </div>
 </div>
+<div class="modal modal-blur fade" id="modal-search-download" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered" role="document">
+    <input type="hidden" id="search_download_id">
+    <input type="hidden" id="search_download_name">
+    <div class="modal-content">
+      <div class="modal-body">
+        <div class="modal-title">询问</div>
+        <div id="search_download_message">是否执行？</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-link link-secondary me-auto" data-bs-dismiss="modal">取消</button>
+        <div class="d-flex">
+          {% if SaveDirs %}
+          <button type="button" class="btn btn-danger" onclick="javascript:download_link()" title="自动选择目录下载"
+                  style="border-top-right-radius:0px;border-bottom-right-radius:0px;">自动下载</button>
+          <button data-bs-toggle="dropdown" type="button"
+              class="btn btn-danger dropdown-toggle dropdown-toggle-split" title="手动选择下载目录"
+            style="border-top-left-radius:0px;border-bottom-left-radius:0px;"></button>
+          <div class="dropdown-menu dropdown-menu-end">
+            {% for SaveDir in SaveDirs %}
+            <a class="dropdown-item" href="javascript:download_link('{{ SaveDir|safe }}')">
+              {{ SaveDir }}
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+           <button type="button" class="btn btn-danger" onclick="javascript:download_link()" title="自动选择目录下载">确认下载</button>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 <script type="text/javascript">
   // 关键字
   var search_word = "{{ SearchWord }}";
@@ -416,10 +450,10 @@
   }
   // 显示下载提示框
   function show_download_modal(id, name) {
-    show_ask_modal("是否立即下载 " + name + "？", function () {
-      hide_ask_modal();
-      download_link(id, name);
-    });
+    $("#search_download_id").val(id);
+    $("#search_download_name").val(name);
+    $("#search_download_message").text("是否立即下载 " + name + "？");
+    $("#modal-search-download").modal('show');
   }
 
   // 搜索按钮
@@ -438,11 +472,11 @@
     $("#quick_search_btn").attr("disabled", "true");
     $("#search_icon").attr("disabled", "true");
     $("#search_tip_title").text("正在搜索 " + keyword + "，请稍后...");
-    $("#search_tip_text").text("");
+    $("#search_tip_text").text("正在搜索 " + keyword + " ...");
     var param = { "search_word": keyword, "unident": unident };
-    show_wait_process();
+    show_refresh_process();
     ajax_post("search", param, function (ret) {
-      hide_wait_process();
+      hide_refresh_process();
       if(ret.code == 0){
         navmenu('search?s=' + keyword);
       }else{
@@ -454,11 +488,22 @@
       }
     });
   }
+
+  //搜索联想
+  function search_media_list(){
+    var keyword = $("#search_word").val();
+    if (keyword == "") {
+      return;
+    }
+    navmenu('medialist?s='+keyword+'&f=1&t=search');
+  }
+
   //点击链接下载
-  function download_link(id, name) {
-    var cmd = "download";
-    var data = { "id": id };
-    ajax_post(cmd, data, function (ret) {
+  function download_link(dir) {
+    var id = $("#search_download_id").val();
+    var name = $("#search_download_name").val();
+    $("#modal-search-download").modal('hide');
+    ajax_post("download", { "id": id, "dir": dir}, function (ret) {
       if(ret.retcode == 0){
         show_success_modal(name + " 添加下载成功！");
       }else{
@@ -470,7 +515,7 @@
   // 搜索输入框
   $('#search_word').bind('keypress', function (event) {
     if (event.keyCode == "13") {
-      navmenu('medialist?s='+$('#search_word').val()+'&f=1&t=search')
+      search_media_list();
     }
   });
 

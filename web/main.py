@@ -1,35 +1,44 @@
 import base64
 import logging
 import os.path
+import shutil
+import sqlite3
 import traceback
+import urllib
+import xml.dom.minidom
 from math import floor
+from pathlib import Path
 from urllib import parse
 
-from flask import Flask, request, json, render_template, make_response, session, send_from_directory
+import cn2an
+from flask import Flask, request, json, render_template, make_response, session, send_from_directory, send_file
 from flask_login import LoginManager, UserMixin, login_user, login_required, current_user
 from werkzeug.security import check_password_hash
-import xml.dom.minidom
 
 import log
+from config import WECHAT_MENU, PT_TRANSFER_INTERVAL, TORRENT_SEARCH_PARAMS, TMDB_IMAGE_W500_URL
 from pt.douban import DouBan
-from pt.sites import Sites
 from pt.downloader import Downloader
-from pt.searcher import Searcher
-from rmt.media import Media
+from pt.filterrules import FilterRule
+from pt.indexer.builtin import BuiltinIndexer
 from pt.media_server import MediaServer
+from pt.searcher import Searcher
+from pt.sites import Sites
+from pt.torrent import Torrent
+from rmt.media import Media
 from rmt.metainfo import MetaInfo
-from config import WECHAT_MENU, PT_TRANSFER_INTERVAL, TORRENT_SEARCH_PARAMS
-from utils.functions import *
+from utils.WXBizMsgCrypt3 import WXBizMsgCrypt
+from utils.dom_utils import DomUtils
 from utils.meta_helper import MetaHelper
 from utils.security import Security
 from utils.sqls import *
+from utils.string_utils import StringUtils
+from utils.system_utils import SystemUtils
 from utils.types import *
 from version import APP_VERSION
 from web.action import WebAction
-from web.backend.douban_hot import DoubanHot
-from web.backend.web_utils import get_random_discover_backdrop
+from web.backend.web_utils import get_login_wallpaper
 from web.backend.webhook_event import WebhookEvent
-from utils.WXBizMsgCrypt3 import WXBizMsgCrypt
 
 login_manager = LoginManager()
 login_manager.login_view = "login"
@@ -46,7 +55,7 @@ def create_flask_app(config):
         "id": 0,
         "name": admin_user,
         "password": admin_password[6:],
-        "pris": "我的媒体库,资源搜索,推荐,站点管理,订阅管理,下载管理,媒体识别,服务,系统设置"
+        "pris": "我的媒体库,资源搜索,推荐,站点管理,订阅管理,下载管理,媒体整理,服务,系统设置"
     }]
 
     App = Flask(__name__)
@@ -140,7 +149,7 @@ def create_flask_app(config):
     def login():
         # 判断当前的运营环境
         SystemFlag = 0
-        if get_system() == OsType.LINUX and check_process("supervisord"):
+        if SystemUtils.get_system() == OsType.LINUX and SystemUtils.check_process("supervisord"):
             SystemFlag = 1
         if request.method == 'GET':
             GoPage = request.args.get("next") or ""
@@ -153,7 +162,7 @@ def create_flask_app(config):
                 if userid is None or username is None:
                     return render_template('login.html',
                                            GoPage=GoPage,
-                                           LoginWallpaper=get_random_discover_backdrop())
+                                           LoginWallpaper=get_login_wallpaper())
                 else:
                     return render_template('navigation.html',
                                            GoPage=GoPage,
@@ -164,7 +173,7 @@ def create_flask_app(config):
             else:
                 return render_template('login.html',
                                        GoPage=GoPage,
-                                       LoginWallpaper=get_random_discover_backdrop())
+                                       LoginWallpaper=get_login_wallpaper())
 
         else:
             GoPage = request.form.get('next') or ""
@@ -176,13 +185,13 @@ def create_flask_app(config):
             if not username:
                 return render_template('login.html',
                                        GoPage=GoPage,
-                                       LoginWallpaper=get_random_discover_backdrop(),
+                                       LoginWallpaper=get_login_wallpaper(),
                                        err_msg="请输入用户名")
             user_info = get_user(username)
             if not user_info:
                 return render_template('login.html',
                                        GoPage=GoPage,
-                                       LoginWallpaper=get_random_discover_backdrop(),
+                                       LoginWallpaper=get_login_wallpaper(),
                                        err_msg="用户名或密码错误")
             # 创建用户实体
             user = User(user_info)
@@ -201,7 +210,7 @@ def create_flask_app(config):
             else:
                 return render_template('login.html',
                                        GoPage=GoPage,
-                                       LoginWallpaper=get_random_discover_backdrop(),
+                                       LoginWallpaper=get_login_wallpaper(),
                                        err_msg="用户名或密码错误")
 
     # 开始
@@ -249,7 +258,7 @@ def create_flask_app(config):
             for movie_path in movie_paths:
                 if not movie_path:
                     continue
-                used, total = get_used_of_partition(movie_path)
+                used, total = SystemUtils.get_used_of_partition(movie_path)
                 if "%s-%s" % (used, total) not in movie_space_list:
                     movie_space_list.append("%s-%s" % (used, total))
                     movie_used += used
@@ -263,7 +272,7 @@ def create_flask_app(config):
             for tv_path in tv_paths:
                 if not tv_path:
                     continue
-                used, total = get_used_of_partition(tv_path)
+                used, total = SystemUtils.get_used_of_partition(tv_path)
                 if "%s-%s" % (used, total) not in tv_space_list:
                     tv_space_list.append("%s-%s" % (used, total))
                     tv_used += used
@@ -277,7 +286,7 @@ def create_flask_app(config):
             for anime_path in anime_paths:
                 if not anime_path:
                     continue
-                used, total = get_used_of_partition(anime_path)
+                used, total = SystemUtils.get_used_of_partition(anime_path)
                 if "%s-%s" % (used, total) not in anime_space_list:
                     anime_space_list.append("%s-%s" % (used, total))
                     anime_used += used
@@ -450,7 +459,10 @@ def create_flask_app(config):
         SiteDict = []
         Indexers = Searcher().indexer.get_indexers() or []
         for item in Indexers:
-            SiteDict.append(item[1])
+            SiteDict.append(item.name)
+
+        # 下载目录
+        SaveDirs = WebAction().get_download_dirs()
         return render_template("search.html",
                                UserPris=str(pris).split(","),
                                SearchWord=SearchWord or "",
@@ -465,7 +477,9 @@ def create_flask_app(config):
                                MediaRestypes=MediaRestypes,
                                RestypeDict=TORRENT_SEARCH_PARAMS.get("restype").keys(),
                                PixDict=TORRENT_SEARCH_PARAMS.get("pix").keys(),
-                               SiteDict=SiteDict)
+                               SiteDict=SiteDict,
+                               SaveDirs=SaveDirs,
+                               UPCHAR=chr(8593))
 
     # 媒体列表页面
     @App.route('/medialist', methods=['POST', 'GET'])
@@ -479,14 +493,23 @@ def create_flask_app(config):
         use_douban_titles = config.get_config("laboratory").get("use_douban_titles")
         if SearchWord and NeedSearch:
             if use_douban_titles:
-                medias = DouBan().search_douban_medias(SearchWord)
+                _, key_word, season_num, episode_num, _, _ = Torrent.get_keyword_from_string(SearchWord)
+                medias = DouBan().search_douban_medias(keyword=key_word,
+                                                       season=season_num,
+                                                       episode=episode_num)
             else:
                 meta_info = MetaInfo(title=SearchWord)
                 tmdbinfos = Media().get_tmdb_infos(title=meta_info.get_name(), year=meta_info.year, num=20)
                 for tmdbinfo in tmdbinfos:
                     tmp_info = MetaInfo(title=SearchWord)
                     tmp_info.set_tmdb_info(tmdbinfo)
-                    tmp_info.poster_path = "https://image.tmdb.org/t/p/w500%s" % tmp_info.poster_path
+                    if meta_info.type == MediaType.TV and tmp_info.type != MediaType.TV:
+                        continue
+                    if tmp_info.begin_season:
+                        tmp_info.title = "%s 第%s季" % (tmp_info.title, cn2an.an2cn(meta_info.begin_season, mode='low'))
+                    if tmp_info.begin_episode:
+                        tmp_info.title = "%s 第%s集" % (tmp_info.title, meta_info.begin_episode)
+                    tmp_info.poster_path = TMDB_IMAGE_W500_URL % tmp_info.poster_path
                     medias.append(tmp_info)
         return render_template("medialist.html",
                                SearchWord=SearchWord or "",
@@ -500,15 +523,17 @@ def create_flask_app(config):
     @login_required
     def movie_rss():
         RssItems = get_rss_movies()
-        RssSites = get_config_site()
-        SearchSites = [item[1] for item in Searcher().indexer.get_indexers()]
+        RssSites = Sites().get_sites()
+        SearchSites = [item.name for item in Searcher().indexer.get_indexers()]
+        RuleGroups = FilterRule().get_rule_groups()
         return render_template("rss/movie_rss.html",
                                Count=len(RssItems),
                                Items=RssItems,
                                Sites=RssSites,
                                SearchSites=SearchSites,
                                RestypeDict=TORRENT_SEARCH_PARAMS.get("restype").keys(),
-                               PixDict=TORRENT_SEARCH_PARAMS.get("pix").keys()
+                               PixDict=TORRENT_SEARCH_PARAMS.get("pix").keys(),
+                               RuleGroups=RuleGroups
                                )
 
     # 电视剧订阅页面
@@ -516,15 +541,17 @@ def create_flask_app(config):
     @login_required
     def tv_rss():
         RssItems = get_rss_tvs()
-        RssSites = get_config_site()
-        SearchSites = [item[1] for item in Searcher().indexer.get_indexers() or []]
+        RssSites = Sites().get_sites()
+        SearchSites = [item.name for item in Searcher().indexer.get_indexers() or []]
+        RuleGroups = FilterRule().get_rule_groups()
         return render_template("rss/tv_rss.html",
                                Count=len(RssItems),
                                Items=RssItems,
                                Sites=RssSites,
                                SearchSites=SearchSites,
                                RestypeDict=TORRENT_SEARCH_PARAMS.get("restype").keys(),
-                               PixDict=TORRENT_SEARCH_PARAMS.get("pix").keys()
+                               PixDict=TORRENT_SEARCH_PARAMS.get("pix").keys(),
+                               RuleGroups=RuleGroups
                                )
 
     # 订阅日历页面
@@ -533,7 +560,8 @@ def create_flask_app(config):
     def rss_calendar():
         Today = datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d')
         RssMovieIds = [movie[2] for movie in get_rss_movies()]
-        RssTvItems = [{"id": tv[3], "season": int(str(tv[2]).replace("S", "")), "name": tv[0]} for tv in get_rss_tvs() if tv[2]]
+        RssTvItems = [{"id": tv[3], "season": int(str(tv[2]).replace("S", "")), "name": tv[0]} for tv in get_rss_tvs()
+                      if tv[2]]
         return render_template("rss/rss_calendar.html",
                                Today=Today,
                                RssMovieIds=RssMovieIds,
@@ -543,119 +571,23 @@ def create_flask_app(config):
     @App.route('/site', methods=['POST', 'GET'])
     @login_required
     def site():
-        CfgSites = get_config_site()
+        CfgSites = Sites().get_sites()
+        RuleGroups = FilterRule().get_rule_groups()
         return render_template("site/site.html",
-                               Sites=CfgSites)
+                               Sites=CfgSites,
+                               RuleGroups=RuleGroups)
 
     # 推荐页面
     @App.route('/recommend', methods=['POST', 'GET'])
     @login_required
     def recommend():
         RecommendType = request.args.get("t")
-        if RecommendType in ['hm', 'ht', 'nm', 'nt']:
-            CurrentPage = request.args.get("page")
-            if not CurrentPage:
-                CurrentPage = 1
-            else:
-                CurrentPage = int(CurrentPage)
-
-            if CurrentPage < 5:
-                StartPage = 1
-                EndPage = 6
-            else:
-                StartPage = CurrentPage - 2
-                EndPage = CurrentPage + 3
-            PageRange = range(StartPage, EndPage)
-        else:
-            PageRange = None
-            CurrentPage = 0
-        if RecommendType == "hm":
-            # TMDB热门电影
-            res_list = Media().get_tmdb_hot_movies(CurrentPage)
-        elif RecommendType == "ht":
-            # TMDB热门电视剧
-            res_list = Media().get_tmdb_hot_tvs(CurrentPage)
-        elif RecommendType == "nm":
-            # TMDB最新电影
-            res_list = Media().get_tmdb_new_movies(CurrentPage)
-        elif RecommendType == "nt":
-            # TMDB最新电视剧
-            res_list = Media().get_tmdb_new_tvs(CurrentPage)
-        elif RecommendType == "dbom":
-            # 豆瓣正在上映
-            res_list = DoubanHot().get_douban_online_movie()
-        elif RecommendType == "dbhm":
-            # 豆瓣热门电影
-            res_list = DoubanHot().get_douban_hot_movie()
-        elif RecommendType == "dbht":
-            # 豆瓣热门电视剧
-            res_list = DoubanHot().get_douban_hot_tv()
-        elif RecommendType == "dbdh":
-            # 豆瓣热门动画
-            res_list = DoubanHot().get_douban_hot_anime()
-        elif RecommendType == "dbnm":
-            # 豆瓣最新电影
-            res_list = DoubanHot().get_douban_new_movie()
-        elif RecommendType == "dbzy":
-            # 豆瓣最新电视剧
-            res_list = DoubanHot().get_douban_hot_show()
-        else:
-            res_list = []
-
-        Items = []
-        TvKeys = ["%s" % key[0] for key in get_rss_tvs()]
-        MovieKeys = ["%s" % key[0] for key in get_rss_movies()]
-        for res in res_list:
-            rid = res.get('id')
-            if RecommendType in ['hm', 'nm', 'dbom', 'dbhm', 'dbnm']:
-                title = res.get('title')
-                date = res.get('release_date')
-                if date:
-                    year = date[0:4]
-                else:
-                    year = ''
-                if title in MovieKeys:
-                    # 已订阅
-                    fav = 1
-                elif is_media_downloaded(title, year):
-                    # 已下载
-                    fav = 2
-                else:
-                    # 未订阅、未下载
-                    fav = 0
-            else:
-                title = res.get('name')
-                date = res.get('first_air_date')
-                if date:
-                    year = date[0:4]
-                else:
-                    year = ''
-                if MetaInfo(title=title).get_name() in TvKeys:
-                    # 已订阅
-                    fav = 1
-                elif is_media_downloaded(MetaInfo(title=title).get_name(), year):
-                    # 已下载
-                    fav = 2
-                else:
-                    # 未订阅、未下载
-                    fav = 0
-            image = res.get('poster_path')
-            if RecommendType in ['hm', 'nm', 'ht', 'nt']:
-                image = "https://image.tmdb.org/t/p/original/%s" % image if image else ""
-            else:
-                # 替换图片分辨率
-                image = image.replace("s_ratio_poster", "m_ratio_poster")
-            vote = res.get('vote_average')
-            overview = res.get('overview')
-            item = {'id': rid, 'title': title, 'fav': fav, 'date': date, 'vote': vote,
-                    'image': image, 'overview': overview, 'year': year}
-            Items.append(item)
-
+        CurrentPage = request.args.get("page") or 1
+        Items = WebAction().get_recommend({"type": RecommendType, "page": CurrentPage}).get("Items")
         return render_template("recommend.html",
                                Items=Items,
                                RecommendType=RecommendType,
-                               CurrentPage=CurrentPage,
-                               PageRange=PageRange)
+                               CurrentPage=CurrentPage)
 
     # 正在下载页面
     @App.route('/downloading', methods=['POST', 'GET'])
@@ -674,15 +606,35 @@ def create_flask_app(config):
                     speed = "已暂停"
                 else:
                     state = "Downloading"
-                    dlspeed = str_filesize(torrent.get('dlspeed'))
-                    upspeed = str_filesize(torrent.get('upspeed'))
+                    dlspeed = StringUtils.str_filesize(torrent.get('dlspeed'))
+                    upspeed = StringUtils.str_filesize(torrent.get('upspeed'))
                     if progress >= 100:
                         speed = "%s%sB/s %s%sB/s" % (chr(8595), dlspeed, chr(8593), upspeed)
                     else:
-                        eta = str_timelong(torrent.get('eta'))
+                        eta = StringUtils.str_timelong(torrent.get('eta'))
                         speed = "%s%sB/s %s%sB/s %s" % (chr(8595), dlspeed, chr(8593), upspeed, eta)
                 # 主键
                 key = torrent.get('hash')
+            elif Client == DownloaderType.Client115:
+                name = torrent.get('name')
+                # 进度
+                progress = round(torrent.get('percentDone'), 1)
+                state = "Downloading"
+                dlspeed = StringUtils.str_filesize(torrent.get('peers'))
+                upspeed = StringUtils.str_filesize(torrent.get('rateDownload'))
+                speed = "%s%sB/s %s%sB/s" % (chr(8595), dlspeed, chr(8593), upspeed)
+                # 主键
+                key = torrent.get('info_hash')
+            elif Client == DownloaderType.Aria2:
+                name = torrent.get('bittorrent', {}).get('info', {}).get("name")
+                # 进度
+                progress = round(int(torrent.get('completedLength')) / int(torrent.get("totalLength")), 1) * 100
+                state = "Downloading"
+                dlspeed = StringUtils.str_filesize(torrent.get('downloadSpeed'))
+                upspeed = StringUtils.str_filesize(torrent.get('uploadSpeed'))
+                speed = "%s%sB/s %s%sB/s" % (chr(8595), dlspeed, chr(8593), upspeed)
+                # 主键
+                key = torrent.get('gid')
             else:
                 name = torrent.name
                 if torrent.status in ['stopped']:
@@ -690,8 +642,8 @@ def create_flask_app(config):
                     speed = "已暂停"
                 else:
                     state = "Downloading"
-                    dlspeed = str_filesize(torrent.rateDownload)
-                    upspeed = str_filesize(torrent.rateUpload)
+                    dlspeed = StringUtils.str_filesize(torrent.rateDownload)
+                    upspeed = StringUtils.str_filesize(torrent.rateUpload)
                     speed = "%s%sB/s %s%sB/s" % (chr(8595), dlspeed, chr(8593), upspeed)
                 # 进度
                 progress = round(torrent.progress)
@@ -721,13 +673,14 @@ def create_flask_app(config):
 
         return render_template("download/downloading.html",
                                DownloadCount=DownloadCount,
-                               Torrents=DispTorrents)
+                               Torrents=DispTorrents,
+                               Client=config.get_config("pt").get("pt_client"))
 
     # 近期下载页面
     @App.route('/downloaded', methods=['POST', 'GET'])
     @login_required
     def downloaded():
-        Items = get_download_history()
+        Items = WebAction().get_downloaded({"page": 1}).get("Items")
         return render_template("download/downloaded.html",
                                Count=len(Items),
                                Items=Items)
@@ -809,7 +762,7 @@ def create_flask_app(config):
     @login_required
     def brushtask():
         # 站点列表
-        CfgSites = get_config_site()
+        CfgSites = Sites().get_sites()
         # 下载器列表
         downloaders = get_user_downloaders()
         # 任务列表
@@ -830,8 +783,8 @@ def create_flask_app(config):
                 "seed_size": task[11],
                 "download_count": task[12],
                 "remove_count": task[13],
-                "download_size": str_filesize(task[14]),
-                "upload_size": str_filesize(task[15]),
+                "download_size": StringUtils.str_filesize(task[14]),
+                "upload_size": StringUtils.str_filesize(task[15]),
                 "lst_mod_date": task[16],
                 "site_url": "http://%s" % parse.urlparse(task[17]).netloc if task[17] else ""
             })
@@ -860,7 +813,7 @@ def create_flask_app(config):
         if pt:
             # RSS订阅
             pt_check_interval = pt.get('pt_check_interval')
-            if pt_check_interval:
+            if str(pt_check_interval).isdigit():
                 tim_rssdownload = str(round(int(pt_check_interval) / 60)) + " 分钟"
                 rss_state = 'ON'
             else:
@@ -874,12 +827,11 @@ def create_flask_app(config):
                      <polyline points="9 19 12 22 15 19"></polyline>
                 </svg>
             '''
-            color = "blue"
             scheduler_cfg_list.append(
                 {'name': 'RSS订阅', 'time': tim_rssdownload, 'state': rss_state, 'id': 'rssdownload', 'svg': svg,
-                 'color': color})
+                 'color': "blue"})
 
-            # PT文件转移
+            # 下载文件转移
             pt_monitor = pt.get('pt_monitor')
             if pt_monitor:
                 tim_pttransfer = str(round(PT_TRANSFER_INTERVAL / 60)) + " 分钟"
@@ -896,12 +848,11 @@ def create_flask_app(config):
                  <path d="M3 13v3a2 2 0 0 0 2 2h6l-3 -3m0 6l3 -3"></path>
             </svg>
             '''
-            color = "green"
             scheduler_cfg_list.append(
-                {'name': 'PT下载转移', 'time': tim_pttransfer, 'state': sta_pttransfer, 'id': 'pttransfer', 'svg': svg,
-                 'color': color})
+                {'name': '下载文件转移', 'time': tim_pttransfer, 'state': sta_pttransfer, 'id': 'pttransfer', 'svg': svg,
+                 'color': "green"})
 
-            # PT删种
+            # 删种
             pt_seeding_config_time = pt.get('pt_seeding_time')
             if pt_seeding_config_time and pt_seeding_config_time != '0':
                 pt_seeding_time = "%s 天" % pt_seeding_config_time
@@ -916,12 +867,11 @@ def create_flask_app(config):
                      <path d="M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3"></path>
                 </svg>
                 '''
-                color = "twitter"
                 scheduler_cfg_list.append(
-                    {'name': 'PT删种', 'time': pt_seeding_time, 'state': sta_autoremovetorrents,
-                     'id': 'autoremovetorrents', 'svg': svg, 'color': color})
+                    {'name': '删种', 'time': pt_seeding_time, 'state': sta_autoremovetorrents,
+                     'id': 'autoremovetorrents', 'svg': svg, 'color': "twitter"})
 
-            # PT自动签到
+            # 自动签到
             tim_ptsignin = pt.get('ptsignin_cron')
             if tim_ptsignin:
                 if str(tim_ptsignin).find(':') == -1:
@@ -935,10 +885,9 @@ def create_flask_app(config):
                      <path d="M16 11l2 2l4 -4"></path>
                 </svg>
                 '''
-                color = "facebook"
                 scheduler_cfg_list.append(
-                    {'name': 'PT站签到', 'time': tim_ptsignin, 'state': sta_ptsignin, 'id': 'ptsignin', 'svg': svg,
-                     'color': color})
+                    {'name': '站点签到', 'time': tim_ptsignin, 'state': sta_ptsignin, 'id': 'ptsignin', 'svg': svg,
+                     'color': "facebook"})
 
         # 目录同步
         sync = config.get_config('sync')
@@ -953,9 +902,9 @@ def create_flask_app(config):
                      <path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"></path>
                 </svg>
                 '''
-                color = "orange"
                 scheduler_cfg_list.append(
-                    {'name': '目录同步', 'time': '实时监控', 'state': sta_sync, 'id': 'sync', 'svg': svg, 'color': color})
+                    {'name': '目录同步', 'time': '实时监控', 'state': sta_sync, 'id': 'sync', 'svg': svg,
+                     'color': "orange"})
         # 豆瓣同步
         douban_cfg = config.get_config('douban')
         if douban_cfg:
@@ -970,9 +919,9 @@ def create_flask_app(config):
                    <path d="M9.265 4a2 2 0 0 1 1.735 -1h6a2 2 0 0 1 2 2v12l-1 -.6"></path>
                 </svg>
                 '''
-                color = "pink"
                 scheduler_cfg_list.append(
-                    {'name': '豆瓣想看', 'time': interval, 'state': sta_douban, 'id': 'douban', 'svg': svg, 'color': color})
+                    {'name': '豆瓣想看', 'time': interval, 'state': sta_douban, 'id': 'douban', 'svg': svg,
+                     'color': "pink"})
 
         # 清理文件整理缓存
         svg = '''
@@ -983,7 +932,7 @@ def create_flask_app(config):
         </svg>
         '''
         scheduler_cfg_list.append(
-            {'name': '清理文件缓存', 'time': '手动', 'state': 'OFF', 'id': 'blacklist', 'svg': svg, 'color': 'red'})
+            {'name': '清理转移缓存', 'time': '手动', 'state': 'OFF', 'id': 'blacklist', 'svg': svg, 'color': 'red'})
 
         # 名称识别测试
         svg = '''
@@ -997,16 +946,54 @@ def create_flask_app(config):
         scheduler_cfg_list.append(
             {'name': '名称识别测试', 'time': '', 'state': 'OFF', 'id': 'nametest', 'svg': svg, 'color': 'lime'})
 
-        # 实时日志
+        # 过滤规则测试
         svg = '''
-        <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-terminal" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-adjustments-horizontal" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
            <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
-           <path d="M5 7l5 5l-5 5"></path>
-           <line x1="12" y1="19" x2="19" y2="19"></line>
+           <circle cx="14" cy="6" r="2"></circle>
+           <line x1="4" y1="6" x2="12" y2="6"></line>
+           <line x1="16" y1="6" x2="20" y2="6"></line>
+           <circle cx="8" cy="12" r="2"></circle>
+           <line x1="4" y1="12" x2="6" y2="12"></line>
+           <line x1="10" y1="12" x2="20" y2="12"></line>
+           <circle cx="17" cy="18" r="2"></circle>
+           <line x1="4" y1="18" x2="15" y2="18"></line>
+           <line x1="19" y1="18" x2="20" y2="18"></line>
         </svg>
         '''
         scheduler_cfg_list.append(
-            {'name': '实时日志', 'time': '', 'state': 'OFF', 'id': 'logging', 'svg': svg, 'color': 'indigo'})
+            {'name': '过滤规则测试', 'time': '', 'state': 'OFF', 'id': 'ruletest', 'svg': svg, 'color': 'yellow'})
+
+        # 网络连通性测试
+        svg = '''
+        <svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-network" width="40" height="40" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+           <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+           <circle cx="12" cy="9" r="6"></circle>
+           <path d="M12 3c1.333 .333 2 2.333 2 6s-.667 5.667 -2 6"></path>
+           <path d="M12 3c-1.333 .333 -2 2.333 -2 6s.667 5.667 2 6"></path>
+           <path d="M6 9h12"></path>
+           <path d="M3 19h7"></path>
+           <path d="M14 19h7"></path>
+           <circle cx="12" cy="19" r="2"></circle>
+           <path d="M12 15v2"></path>
+        </svg>
+        '''
+        targets = ["www.themoviedb.org", "api.themoviedb.org", "image.tmdb.org",
+                   "webservice.fanart.tv", "api.telegram.org", "qyapi.weixin.qq.com"]
+        scheduler_cfg_list.append(
+            {'name': '网络连通性测试', 'time': '', 'state': 'OFF', 'id': 'nettest', 'svg': svg, 'color': 'cyan',
+             "targets": targets})
+
+        # 备份
+        svg = '''
+        <svg t="1660720525544" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1559" width="16" height="16">
+        <path d="M646 1024H100A100 100 0 0 1 0 924V258a100 100 0 0 1 100-100h546a100 100 0 0 1 100 100v31a40 40 0 1 1-80 0v-31a20 20 0 0 0-20-20H100a20 20 0 0 0-20 20v666a20 20 0 0 0 20 20h546a20 20 0 0 0 20-20V713a40 40 0 0 1 80 0v211a100 100 0 0 1-100 100z" fill="#ffffff" p-id="1560"></path>
+        <path d="M924 866H806a40 40 0 0 1 0-80h118a20 20 0 0 0 20-20V100a20 20 0 0 0-20-20H378a20 20 0 0 0-20 20v8a40 40 0 0 1-80 0v-8A100 100 0 0 1 378 0h546a100 100 0 0 1 100 100v666a100 100 0 0 1-100 100z" fill="#ffffff" p-id="1561"></path>
+        <path d="M469 887a40 40 0 0 1-27-10L152 618a40 40 0 0 1 1-60l290-248a40 40 0 0 1 66 30v128a367 367 0 0 0 241-128l94-111a40 40 0 0 1 70 35l-26 109a430 430 0 0 1-379 332v142a40 40 0 0 1-40 40zM240 589l189 169v-91a40 40 0 0 1 40-40c144 0 269-85 323-214a447 447 0 0 1-323 137 40 40 0 0 1-40-40v-83z" fill="#ffffff" p-id="1562"></path>
+        </svg>
+        '''
+        scheduler_cfg_list.append(
+            {'name': '备份&恢复', 'time': '', 'state': 'OFF', 'id': 'backup', 'svg': svg, 'color': 'green'})
 
         return render_template("service.html",
                                Count=len(scheduler_cfg_list),
@@ -1116,7 +1103,9 @@ def create_flask_app(config):
         for rec in Records:
             if not rec[1]:
                 continue
-            Items.append({"id": rec[0], "path": rec[1], "to": rec[2], "name": rec[1]})
+            path = rec[1].replace("\\", "/") if rec[1] else ""
+            path_to = rec[2].replace("\\", "/") if rec[2] else ""
+            Items.append({"id": rec[0], "path": path, "to": path_to, "name": path})
         return render_template("rename/unidentification.html",
                                TotalCount=TotalCount,
                                Items=Items)
@@ -1135,32 +1124,43 @@ def create_flask_app(config):
     @login_required
     def directorysync():
         sync_paths = config.get_config("sync").get("sync_path")
+        rmt_mode = config.get_config("sync").get("sync_mod")
         SyncPaths = []
         if sync_paths:
             if isinstance(sync_paths, list):
-                for sync_path in sync_paths:
-                    SyncPath = {}
-                    is_rename = True
-                    is_enabled = True
-                    if sync_path.startswith("#"):
-                        is_enabled = False
-                        sync_path = sync_path[1:-1]
-                    if sync_path.startswith("["):
-                        is_rename = False
-                        sync_path = sync_path[1:-1]
-                    paths = sync_path.split("|")
+                for sync_items in sync_paths:
+                    SyncPath = {'enabled': True, 'rename': True}
+                    # 是否启用
+                    if sync_items.startswith("#"):
+                        SyncPath['enabled'] = False
+                        sync_items = sync_items[1:-1]
+                    # 是否重命名
+                    if sync_items.startswith("["):
+                        SyncPath['rename'] = False
+                        sync_items = sync_items[1:-1]
+                    # 转移方式
+                    config_items = sync_items.split("@")
+                    if not config_items:
+                        continue
+                    if len(config_items) > 1:
+                        SyncPath['syncmod'] = config_items[-1]
+                    else:
+                        SyncPath['syncmod'] = rmt_mode
+                    SyncPath['syncmod_name'] = RmtMode[SyncPath['syncmod'].upper()].value
+                    if not SyncPath['syncmod']:
+                        continue
+                    # 源目录|目的目录|未知目录
+                    paths = config_items[0].split("|")
                     if not paths:
                         continue
                     if len(paths) > 0:
                         if not paths[0]:
                             continue
-                        SyncPath['from'] = paths[0]
+                        SyncPath['from'] = paths[0].replace("\\", "/")
                     if len(paths) > 1:
-                        SyncPath['to'] = paths[1]
+                        SyncPath['to'] = paths[1].replace("\\", "/")
                     if len(paths) > 2:
-                        SyncPath['unknown'] = paths[2]
-                    SyncPath['rename'] = is_rename
-                    SyncPath['enabled'] = is_enabled
+                        SyncPath['unknown'] = paths[2].replace("\\", "/")
                     SyncPaths.append(SyncPath)
             else:
                 SyncPaths = [{"from": sync_paths}]
@@ -1180,7 +1180,7 @@ def create_flask_app(config):
     def downloader():
         # Qbittorrent
         qbittorrent = config.get_config('qbittorrent')
-        save_path = qbittorrent.get("save_path")
+        save_path = qbittorrent.get("save_path", {})
         if isinstance(save_path, str):
             paths = save_path.split("|")
             if len(paths) > 1:
@@ -1233,7 +1233,7 @@ def create_flask_app(config):
                 path = ""
                 tag = ""
             QbAnimeSavePath = {"path": path, "tag": tag}
-        contianer_path = qbittorrent.get('save_containerpath')
+        contianer_path = qbittorrent.get('save_containerpath', {})
         if isinstance(contianer_path, str):
             QbMovieContainerPath = QbTvContainerPath = QbAnimeContainerPath = contianer_path
         else:
@@ -1246,14 +1246,14 @@ def create_flask_app(config):
 
         # Transmission
         transmission = config.get_config('transmission')
-        save_path = transmission.get("save_path")
+        save_path = transmission.get("save_path", {})
         if isinstance(save_path, str):
             TrMovieSavePath = TrTvSavePath = TrAnimeSavePath = save_path
         else:
             TrMovieSavePath = save_path.get("movie")
             TrTvSavePath = save_path.get("tv")
             TrAnimeSavePath = save_path.get("anime")
-        contianer_path = transmission.get('save_containerpath')
+        contianer_path = transmission.get('save_containerpath', {})
         if isinstance(contianer_path, str):
             TrMovieContainerPath = TrTvContainerPath = TrAnimeContainerPath = contianer_path
         else:
@@ -1264,26 +1264,81 @@ def create_flask_app(config):
             else:
                 TrMovieContainerPath = TrTvContainerPath = TrAnimeContainerPath = ""
 
+        # Cloudtorrent
+        client115 = config.get_config('client115')
+        save_path = client115.get("save_path", {})
+        if isinstance(save_path, str):
+            CloudMovieSavePath = CloudTvSavePath = CloudAnimeSavePath = save_path
+        else:
+            CloudMovieSavePath = save_path.get("movie")
+            CloudTvSavePath = save_path.get("tv")
+            CloudAnimeSavePath = save_path.get("anime")
+        contianer_path = client115.get('save_containerpath', {})
+        if isinstance(contianer_path, str):
+            CloudMovieContainerPath = CloudTvContainerPath = CloudAnimeContainerPath = contianer_path
+        else:
+            if contianer_path:
+                CloudMovieContainerPath = contianer_path.get("movie")
+                CloudTvContainerPath = contianer_path.get("tv")
+                CloudAnimeContainerPath = contianer_path.get("anime")
+            else:
+                CloudMovieContainerPath = CloudTvContainerPath = CloudAnimeContainerPath = ""
+
+        # Aria2
+        aria2 = config.get_config('aria2')
+        save_path = aria2.get("save_path", {})
+        if isinstance(save_path, str):
+            Aria2MovieSavePath = Aria2TvSavePath = Aria2AnimeSavePath = save_path
+        else:
+            Aria2MovieSavePath = save_path.get("movie")
+            Aria2TvSavePath = save_path.get("tv")
+            Aria2AnimeSavePath = save_path.get("anime")
+        contianer_path = aria2.get('save_containerpath', {})
+        if isinstance(contianer_path, str):
+            Aria2MovieContainerPath = Aria2TvContainerPath = Aria2AnimeContainerPath = contianer_path
+        else:
+            if contianer_path:
+                Aria2MovieContainerPath = contianer_path.get("movie")
+                Aria2TvContainerPath = contianer_path.get("tv")
+                Aria2AnimeContainerPath = contianer_path.get("anime")
+            else:
+                Aria2MovieContainerPath = Aria2TvContainerPath = Aria2AnimeContainerPath = ""
+
         return render_template("setting/downloader.html",
                                Config=config.get_config(),
                                QbMovieSavePath=QbMovieSavePath,
                                QbTvSavePath=QbTvSavePath,
                                QbAnimeSavePath=QbAnimeSavePath,
-                               TrMovieSavePath=TrMovieSavePath,
-                               TrTvSavePath=TrTvSavePath,
-                               TrAnimeSavePath=TrAnimeSavePath,
                                QbMovieContainerPath=QbMovieContainerPath,
                                QbTvContainerPath=QbTvContainerPath,
                                QbAnimeContainerPath=QbAnimeContainerPath,
+                               TrMovieSavePath=TrMovieSavePath,
+                               TrTvSavePath=TrTvSavePath,
+                               TrAnimeSavePath=TrAnimeSavePath,
                                TrMovieContainerPath=TrMovieContainerPath,
                                TrTvContainerPath=TrTvContainerPath,
-                               TrAnimeContainerPath=TrAnimeContainerPath)
+                               TrAnimeContainerPath=TrAnimeContainerPath,
+                               CloudMovieSavePath=CloudMovieSavePath,
+                               CloudTvSavePath=CloudTvSavePath,
+                               CloudAnimeSavePath=CloudAnimeSavePath,
+                               CloudMovieContainerPath=CloudMovieContainerPath,
+                               CloudTvContainerPath=CloudTvContainerPath,
+                               CloudAnimeContainerPath=CloudAnimeContainerPath,
+                               Aria2MovieSavePath=Aria2MovieSavePath,
+                               Aria2TvSavePath=Aria2TvSavePath,
+                               Aria2AnimeSavePath=Aria2AnimeSavePath,
+                               Aria2MovieContainerPath=Aria2MovieContainerPath,
+                               Aria2TvContainerPath=Aria2TvContainerPath,
+                               Aria2AnimeContainerPath=Aria2AnimeContainerPath)
 
     # 索引器页面
     @App.route('/indexer', methods=['POST', 'GET'])
     @login_required
     def indexer():
-        return render_template("setting/indexer.html", Config=config.get_config())
+        indexers = BuiltinIndexer().get_indexers()
+        return render_template("setting/indexer.html",
+                               Config=config.get_config(),
+                               Indexers=indexers)
 
     # 媒体库页面
     @App.route('/library', methods=['POST', 'GET'])
@@ -1321,6 +1376,15 @@ def create_flask_app(config):
             Users.append({"id": user[0], "name": user[1], "pris": pris})
         return render_template("setting/users.html", Users=Users, UserCount=user_count)
 
+    # 过滤规则设置页面
+    @App.route('/filterrule', methods=['POST', 'GET'])
+    @login_required
+    def filterrule():
+        RuleGroups = FilterRule().get_rule_infos()
+        return render_template("setting/filterrule.html",
+                               Count=len(RuleGroups),
+                               RuleGroups=RuleGroups)
+
     # 事件响应
     @App.route('/do', methods=['POST'])
     @login_required
@@ -1333,6 +1397,33 @@ def create_flask_app(config):
         if data:
             data = json.loads(data)
         return WebAction().action(cmd, data)
+
+    # 目录事件响应
+    @App.route('/dirlist', methods=['POST'])
+    @login_required
+    def dirlist():
+        r = ['<ul class="jqueryFileTree" style="display: none;">']
+        try:
+            r = ['<ul class="jqueryFileTree" style="display: none;">']
+            d = os.path.normpath(urllib.parse.unquote(request.form.get('dir', '/')))
+            ft = request.form.get("filter")
+            if not os.path.isdir(d):
+                d = os.path.dirname(d)
+            for f in os.listdir(d):
+                ff = os.path.join(d, f)
+                if os.path.isdir(ff):
+                    r.append('<li class="directory collapsed"><a rel="%s/">%s</a></li>' % (
+                    ff.replace("\\", "/"), f.replace("\\", "/")))
+                else:
+                    if ft != "HIDE_FILES_FILTER":
+                        e = os.path.splitext(f)[1][1:]
+                        r.append('<li class="file ext_%s"><a rel="%s">%s</a></li>' % (
+                        e, ff.replace("\\", "/"), f.replace("\\", "/")))
+            r.append('</ul>')
+        except Exception as e:
+            r.append('加载路径失败: %s' % str(e))
+        r.append('</ul>')
+        return make_response(''.join(r), 200)
 
     # 禁止搜索引擎
     @App.route('/robots.txt', methods=['GET', 'POST'])
@@ -1354,6 +1445,8 @@ def create_flask_app(config):
         sVerifyNonce = request.args.get("nonce")
 
         if request.method == 'GET':
+            if not sVerifyMsgSig and not sVerifyTimeStamp and not sVerifyNonce:
+                return "放心吧，服务是正常的！<br>微信回调配置步聚：<br>1、在微信企业应用接收消息设置页面生成Token和EncodingAESKey并填入设置->消息通知->微信对应项。<br>2、保存并重启本工具，保存并重启本工具，保存并重启本工具。<br>3、在微信企业应用接收消息设置页面输入此地址：http(s)://IP:PORT/wechat（IP、PORT替换为本工具的外网访问地址及端口，需要有公网IP并做好端口转发，最好有域名）。"
             sVerifyEchoStr = request.args.get("echostr")
             log.debug("收到微信验证请求: echostr= %s" % sVerifyEchoStr)
             ret, sEchoStr = wxcpt.VerifyURL(sVerifyMsgSig, sVerifyTimeStamp, sVerifyNonce, sVerifyEchoStr)
@@ -1394,9 +1487,9 @@ def create_flask_app(config):
                 dom_tree = xml.dom.minidom.parseString(sMsg.decode('UTF-8'))
                 root_node = dom_tree.documentElement
                 # 消息类型
-                msg_type = tag_value(root_node, "MsgType")
+                msg_type = DomUtils.tag_value(root_node, "MsgType")
                 # 用户ID
-                user_id = tag_value(root_node, "FromUserName")
+                user_id = DomUtils.tag_value(root_node, "FromUserName")
                 # 没的消息类型和用户ID的消息不要
                 if not msg_type or not user_id:
                     log.info("收到微信心跳报文...")
@@ -1405,7 +1498,7 @@ def create_flask_app(config):
                 content = ""
                 if msg_type == "event":
                     # 事件消息
-                    event_key = tag_value(root_node, "EventKey")
+                    event_key = DomUtils.tag_value(root_node, "EventKey")
                     if event_key:
                         log.info("点击菜单：%s" % event_key)
                         keys = event_key.split('#')
@@ -1413,7 +1506,7 @@ def create_flask_app(config):
                             content = WECHAT_MENU.get(keys[2])
                 elif msg_type == "text":
                     # 文本消息
-                    content = tag_value(root_node, "Content", default="")
+                    content = DomUtils.tag_value(root_node, "Content", default="")
                 if content:
                     # 处理消息内容
                     WebAction().handle_message_job(content, SearchType.WX, user_id)
@@ -1470,6 +1563,63 @@ def create_flask_app(config):
             if text:
                 WebAction().handle_message_job(text, SearchType.TG, user_id)
         return 'Success'
+
+    @App.route('/backup', methods=['POST'])
+    @login_required
+    def backup():
+        """
+        备份用户设置文件
+        :return: 备份文件.zip_file
+        """
+        try:
+            # 创建备份文件夹
+            config_path = Path(config.get_config_path())
+            backup_file = f"bk_{time.strftime('%Y%m%d%H%M%S')}"
+            backup_path = config_path / "backup_file" / backup_file
+            backup_path.mkdir(parents=True)
+            # 把现有的相关文件进行copy备份
+            shutil.copy(f'{config_path}/config.yaml', backup_path)
+            shutil.copy(f'{config_path}/default-category.yaml', backup_path)
+            shutil.copy(f'{config_path}/user.db', backup_path)
+            conn = sqlite3.connect(f'{backup_path}/user.db')
+            cursor = conn.cursor()
+            # 执行操作删除不需要备份的表
+            table_list = [
+                'SEARCH_RESULT_INFO',
+                'RSS_TORRENTS',
+                'DOUBAN_MEDIAS',
+                'TRANSFER_HISTORY',
+                'TRANSFER_UNKNOWN',
+                'TRANSFER_BLACKLIST',
+                'SYNC_HISTORY',
+                'DOWNLOAD_HISTORY',
+            ]
+            for table in table_list:
+                cursor.execute(f"""DROP TABLE IF EXISTS {table};""")
+            conn.commit()
+            cursor.close()
+            conn.close()
+            zip_file = str(backup_path) + '.zip'
+            if os.path.exists(zip_file):
+                zip_file = str(backup_path) + '.zip'
+            shutil.make_archive(str(backup_path), 'zip', str(backup_path))
+            shutil.rmtree(str(backup_path))
+        except Exception as e:
+            log.debug(e)
+            return make_response("创建备份失败", 400)
+        return send_file(zip_file)
+
+    @App.route('/upload', methods=['POST'])
+    @login_required
+    def upload():
+        try:
+            files = request.files['file']
+            zip_file = Path(config.get_config_path()) / files.filename
+            files.save(str(zip_file))
+            return {"code": 0, "filepath": str(zip_file)}
+        except Exception as e:
+            log.debug(e)
+            return {"code": 1, "msg": str(e), "filepath": ""}
 
     # 自定义模板过滤器
     @App.template_filter('b64encode')

@@ -5,8 +5,9 @@ import time
 from collections import deque
 from html import escape
 from logging.handlers import RotatingFileHandler
+
 from config import Config
-from utils.sqls import insert_system_message
+from utils.sysmsg_helper import MessageCenter
 
 lock = threading.Lock()
 LOG_QUEUE = deque(maxlen=200)
@@ -31,16 +32,19 @@ class Logger:
         loglevel = self.__config.get_config('app').get('loglevel') or "info"
         self.logger.setLevel(level=self.__loglevels.get(loglevel))
         if logtype == "server":
-            logserver = self.__config.get_config('app').get('logserver')
-            logip = logserver.split(':')[0]
-            logport = int(logserver.split(':')[1])
+            logserver = self.__config.get_config('app').get('logserver', '').split(':')
+            logip = logserver[0]
+            if len(logserver) > 1:
+                logport = int(logserver[1] or '514')
+            else:
+                logport = 514
             log_server_handler = logging.handlers.SysLogHandler((logip, logport),
                                                                 logging.handlers.SysLogHandler.LOG_USER)
             log_server_handler.setFormatter(logging.Formatter('%(filename)s: %(message)s'))
             self.logger.addHandler(log_server_handler)
         else:
             # 记录日志到文件
-            logpath = self.__config.get_config('app').get('logpath') or ""
+            logpath = os.environ.get('NASTOOL_LOG') or self.__config.get_config('app').get('logpath') or ""
             if not os.path.exists(logpath):
                 os.makedirs(logpath)
             log_file_handler = RotatingFileHandler(filename=os.path.join(logpath, __name__ + ".txt"),
@@ -67,47 +71,33 @@ class Logger:
         return Logger.__instance
 
 
+def __append_log_queue(level, text):
+    global LOG_INDEX, LOG_QUEUE
+    with lock:
+        LOG_QUEUE.append(f"{time.strftime('%H:%M:%S', time.localtime(time.time()))} {level} - {escape(text)}")
+        LOG_INDEX += 1
+
+
 def debug(text):
     return Logger.get_instance().logger.debug(text)
 
 
 def info(text):
-    global LOG_INDEX, LOG_QUEUE
-    with lock:
-        LOG_QUEUE.append(f"{time.strftime('%H:%M:%S', time.localtime(time.time()))} INFO - {escape(text)}")
-        LOG_INDEX += 1
+    __append_log_queue("INFO", text)
     return Logger.get_instance().logger.info(text)
 
 
 def error(text):
-    global LOG_INDEX, LOG_QUEUE
-    with lock:
-        LOG_QUEUE.append(f"{time.strftime('%H:%M:%S', time.localtime(time.time()))} ERROR - {escape(text)}")
-        LOG_INDEX += 1
-    try:
-        if text.strip().find("：") != -1:
-            title = text.split("：")[0]
-            content = text.split("：")[1]
-        else:
-            title = text.strip()
-            content = ""
-        insert_system_message(level="ERROR", title=title, content=content)
-    except Exception as e:
-        print(str(e))
+    __append_log_queue("ERROR", text)
+    MessageCenter().insert_system_message(level="ERROR", title=text)
     return Logger.get_instance().logger.error(text)
 
 
 def warn(text):
-    global LOG_INDEX, LOG_QUEUE
-    with lock:
-        LOG_QUEUE.append(f"{time.strftime('%H:%M:%S', time.localtime(time.time()))} WARN - {escape(text)}")
-        LOG_INDEX += 1
+    __append_log_queue("WARN", text)
     return Logger.get_instance().logger.warning(text)
 
 
 def console(text):
-    global LOG_INDEX, LOG_QUEUE
-    with lock:
-        LOG_QUEUE.append(f"{time.strftime('%H:%M:%S', time.localtime(time.time()))} - {escape(text)}")
-        LOG_INDEX += 1
+    __append_log_queue("INFO", text)
     print(text)

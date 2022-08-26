@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import requests
 
-from utils.functions import singleton
+from utils.commons import singleton
 from utils.http_utils import RequestUtils
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ class DoubanApi(object):
         pass
 
     @classmethod
-    @lru_cache(maxsize=256)
+    @lru_cache(maxsize=128)
     def __invoke(cls, url, **kwargs):
         req_url = cls._base_url + url
 

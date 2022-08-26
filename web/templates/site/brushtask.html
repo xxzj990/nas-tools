@@ -198,14 +198,14 @@
                 <select class="form-select" id="brushtask_site">
                   <option value="" selected>请选择</option>
                   {% for site in Sites %}
-                  <option value="{{ site[0] }}">{{ site[1] }}</option>
+                  <option value="{{ site.id }}">{{ site.name }}</option>
                   {% endfor %}
                 </select>
               </div>
             </div>
             <div class="col-lg-4">
               <div class="mb-3">
-                <label class="form-label required">刷新间隔(分钟) <span class="form-help bg-red-lt" title="检查站点RSS更新的间隔时间，为了减小PT站压力，建议不小于10分钟" data-bs-toggle="tooltip">?</span></label>
+                <label class="form-label required">刷新间隔(分钟) <span class="form-help bg-red-lt" title="检查站点RSS更新的间隔时间，为了减小站点压力，建议不小于10分钟" data-bs-toggle="tooltip">?</span></label>
                 <input type="text" id="brushtask_interval" class="form-control" placeholder="30">
               </div>
             </div>
@@ -254,7 +254,7 @@
           <div class="row">
             <div class="col-lg-4">
               <div class="mb-3">
-                <label class="form-label">促销 <span class="form-help bg-red-lt" title="选全部会下载到促销的种子，免费包括2X免费" data-bs-toggle="tooltip">?</span></label>
+                <label class="form-label">促销 <span class="form-help bg-red-lt" title="选全部即不过滤会下载到非促销的种子，免费包括2X免费" data-bs-toggle="tooltip">?</span></label>
                 <select class="form-select" id="brushtask_free">
                   <option value="" selected>全部</option>
                   <option value="FREE">免费</option>
@@ -317,6 +317,12 @@
                 <input type="text" id="brushtask_dlcount" class="form-control" placeholder="10">
               </div>
             </div>
+            <div class="col-lg-4">
+              <div class="mb-3">
+                <label class="form-label">做种人数限制 <span class="form-help bg-red-lt" title="种子当前做种人数大于人数限制时不会下载" data-bs-toggle="tooltip">?</span></label>
+                <input type="text" id="brushtask_peercount" class="form-control" placeholder="10">
+              </div>
+            </div>
           </div>
         </div>
         <div class="hr-text hr-text-center hr-text-spaceless">删种规则</div>
@@ -324,7 +330,7 @@
           <div class="row">
             <div class="col-lg-4">
               <div class="mb-3">
-                <label class="form-label">做种时间(小时) <span class="form-help bg-red-lt" title="做种超过设定时间时会删除下载任务（包括已下载的文件）" data-bs-toggle="tooltip">?</span></label>
+                <label class="form-label">做种时间(小时) <span class="form-help bg-red-lt" title="做种超过设定时间时会删除下载任务" data-bs-toggle="tooltip">?</span></label>
                 <div class="input-group">
                   <button type="button" class="btn dropdown-toggle" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false" id="brushtask_seedtime_btn">
                     忽略
@@ -344,7 +350,7 @@
             </div>
             <div class="col-lg-4">
               <div class="mb-3">
-                <label class="form-label">分享率 <span class="form-help bg-red-lt" title="分享率超过设定值时会删除下载任务（包括已下载的文件）" data-bs-toggle="tooltip">?</span></label>
+                <label class="form-label">分享率 <span class="form-help bg-red-lt" title="分享率超过设定值时会删除下载任务" data-bs-toggle="tooltip">?</span></label>
                 <div class="input-group">
                   <button type="button" class="btn dropdown-toggle" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false" id="brushtask_seedratio_btn">
                     忽略
@@ -364,7 +370,7 @@
             </div>
             <div class="col-lg-4">
               <div class="mb-3">
-                <label class="form-label">上传量(GB) <span class="form-help bg-red-lt" title="上传量超过设定值时会删除下载任务（包括已下载的文件）" data-bs-toggle="tooltip">?</span></label>
+                <label class="form-label">上传量(GB) <span class="form-help bg-red-lt" title="上传量超过设定值时会删除下载任务" data-bs-toggle="tooltip">?</span></label>
                 <div class="input-group">
                   <button type="button" class="btn dropdown-toggle" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false" id="brushtask_seedsize_btn">
                     忽略
@@ -382,10 +388,51 @@
                 </div>
               </div>
             </div>
+            <div class="col-lg-4">
+              <div class="mb-3">
+                <label class="form-label">下载耗时(小时) <span class="form-help bg-red-lt" title="下载耗时超过设定值仍然未下载完成时会删除下载任务" data-bs-toggle="tooltip">?</span></label>
+                <div class="input-group">
+                  <button type="button" class="btn dropdown-toggle" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false" id="brushtask_dltime_btn">
+                    忽略
+                  </button>
+                  <input type="hidden" id="brushtask_dltime_do">
+                  <div class="dropdown-menu" style="">
+                    <a class="dropdown-item" id="brushtask_dltime_do_" href="javascript:void(0)" onclick="javascript:filter_item_change('', 'brushtask_dltime',$(this))">
+                      忽略
+                    </a>
+                    <a class="dropdown-item" id="brushtask_dltime_do_gt" href="javascript:void(0)" onclick="javascript:filter_item_change('gt', 'brushtask_dltime',$(this))">
+                      大于
+                    </a>
+                  </div>
+                  <input type="text" class="form-control" id="brushtask_dltime" readonly>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-4">
+              <div class="mb-3">
+                <label class="form-label">平均上传速度(KB/S) <span class="form-help bg-red-lt" title="平均上传速度低于设定值时删除下载任务，检查周期为10分钟" data-bs-toggle="tooltip">?</span></label>
+                <div class="input-group">
+                  <button type="button" class="btn dropdown-toggle" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false" id="brushtask_avg_upspeed_btn">
+                    忽略
+                  </button>
+                  <input type="hidden" id="brushtask_avg_upspeed_do">
+                  <div class="dropdown-menu" style="">
+                    <a class="dropdown-item" id="brushtask_avg_upspeed_do_" href="javascript:void(0)" onclick="javascript:filter_item_change('', 'brushtask_avg_upspeed',$(this))">
+                      忽略
+                    </a>
+                    <a class="dropdown-item" id="brushtask_avg_upspeed_do_lt" href="javascript:void(0)" onclick="javascript:filter_item_change('lt', 'brushtask_avg_upspeed',$(this))">
+                      小于
+                    </a>
+                  </div>
+                  <input type="text" class="form-control" id="brushtask_avg_upspeed" readonly>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
       <div class="modal-footer">
+        <button type="button" class="btn btn-link me-auto" data-bs-dismiss="modal">取消</button>
         <a href="javascript:add_brushtask_job()" id="brushtask_add_btn" class="btn btn-primary">确定</a>
       </div>
     </div>
@@ -394,7 +441,7 @@
 <script type="text/javascript">
   // 显示新增刷流任务
   function show_brushtask_modal(){
-    $("#brushtask_modal_title").text("新增任务");
+    $("#brushtask_modal_title").text("新建任务");
     $("#brushtask_id").val("");
     $("#modal-brushtask").modal('show');
   }
@@ -419,20 +466,39 @@
           $("#brushtask_transfer").prop("checked", false);
         }
         $("#brushtask_dlcount").val(ret.task.rss_rule.dlcount)
+        $("#brushtask_peercount").val(ret.task.rss_rule.peercount)
         $("#brushtask_include").val(ret.task.rss_rule.include);
         $("#brushtask_exclude").val(ret.task.rss_rule.exclude);
         //种子大小
-        size_str = ret.task.rss_rule.size.split('#');
-        filter_item_change(size_str[0], 'brushtask_torrent_size', $('#brushtask_torrent_size_do_' + size_str[0]), size_str[1])
+        if(ret.task.rss_rule.size){
+          size_str = ret.task.rss_rule.size.split('#');
+          filter_item_change(size_str[0], 'brushtask_torrent_size', $('#brushtask_torrent_size_do_' + size_str[0]), size_str[1])
+        }
         //做种时间
-        seedtime_str = ret.task.remove_rule.time.split('#');
-        filter_item_change(seedtime_str[0], 'brushtask_seedtime', $('#brushtask_seedtime_do_' + seedtime_str[0]), seedtime_str[1])
+        if(ret.task.remove_rule.time){
+          seedtime_str = ret.task.remove_rule.time.split('#');
+          filter_item_change(seedtime_str[0], 'brushtask_seedtime', $('#brushtask_seedtime_do_' + seedtime_str[0]), seedtime_str[1])
+        }
         //做种大小
-        seedsize_str = ret.task.remove_rule.uploadsize.split('#');
-        filter_item_change(seedsize_str[0], 'brushtask_seedsize', $('#brushtask_seedsize_do_' + seedsize_str[0]), seedsize_str[1])
+        if(ret.task.remove_rule.uploadsize){
+          seedsize_str = ret.task.remove_rule.uploadsize.split('#');
+          filter_item_change(seedsize_str[0], 'brushtask_seedsize', $('#brushtask_seedsize_do_' + seedsize_str[0]), seedsize_str[1])
+        }
         //分享率
-        seedratio_str = ret.task.remove_rule.ratio.split('#');
-        filter_item_change(seedratio_str[0], 'brushtask_seedratio', $('#brushtask_seedratio_do_' + seedratio_str[0]), seedratio_str[1])
+        if(ret.task.remove_rule.ratio){
+          seedratio_str = ret.task.remove_rule.ratio.split('#');
+          filter_item_change(seedratio_str[0], 'brushtask_seedratio', $('#brushtask_seedratio_do_' + seedratio_str[0]), seedratio_str[1])
+        }
+        //下载耗时
+        if(ret.task.remove_rule.dltime){
+          dltime_str = ret.task.remove_rule.dltime.split('#');
+          filter_item_change(dltime_str[0], 'brushtask_dltime', $('#brushtask_dltime_do_' + dltime_str[0]), dltime_str[1])
+        }
+        //上传速度
+        if(ret.task.remove_rule.avg_upspeed){
+          avg_upspeed_str = ret.task.remove_rule.avg_upspeed.split('#');
+          filter_item_change(avg_upspeed_str[0], 'brushtask_avg_upspeed', $('#brushtask_avg_upspeed_do_' + avg_upspeed_str[0]), avg_upspeed_str[1])
+        }
         //弹窗
         $("#modal-brushtask").modal('show');
       }
@@ -537,6 +603,7 @@
     var brushtask_transfer = $("#brushtask_transfer").prop('checked');
     var brushtask_free = $("#brushtask_free").val();
     var brushtask_hr = $("#brushtask_hr").val();
+    //种子大小
     var brushtask_torrent_size_do = $("#brushtask_torrent_size_do").val();
     var brushtask_torrent_size = $("#brushtask_torrent_size").val();
     if(brushtask_torrent_size_do && !brushtask_torrent_size){
@@ -552,8 +619,11 @@
       }
       $("#brushtask_torrent_size").removeClass("is-invalid");
     }
+    //包含
     var brushtask_include = $("#brushtask_include").val();
+    //排除
     var brushtask_exclude = $("#brushtask_exclude").val();
+    //同时下载数
     var brushtask_dlcount = $("#brushtask_dlcount").val();
     if(brushtask_dlcount && isNaN(brushtask_dlcount)){
       $("#brushtask_dlcount").addClass("is-invalid");
@@ -561,6 +631,15 @@
     }else{
       $("#brushtask_dlcount").removeClass("is-invalid");
     }
+    //做种人数
+    var brushtask_peercount = $("#brushtask_peercount").val();
+    if(brushtask_peercount && isNaN(brushtask_peercount)){
+      $("#brushtask_peercount").addClass("is-invalid");
+      return;
+    }else{
+      $("#brushtask_peercount").removeClass("is-invalid");
+    }
+    //做种时间
     var brushtask_seedtime_do = $("#brushtask_seedtime_do").val();
     var brushtask_seedtime = $("#brushtask_seedtime").val();
     if(brushtask_seedtime_do && !brushtask_seedtime){
@@ -573,6 +652,7 @@
       }
       $("#brushtask_seedtime").removeClass("is-invalid");
     }
+    //分享率
     var brushtask_seedratio_do = $("#brushtask_seedratio_do").val();
     var brushtask_seedratio = $("#brushtask_seedratio").val();
     if(brushtask_seedratio_do && !brushtask_seedratio){
@@ -585,6 +665,7 @@
       }
       $("#brushtask_seedratio").removeClass("is-invalid");
     }
+    //上传量
     var brushtask_seedsize_do = $("#brushtask_seedsize_do").val();
     var brushtask_seedsize = $("#brushtask_seedsize").val();
     if(brushtask_seedsize_do && !brushtask_seedsize){
@@ -596,6 +677,32 @@
         return;
       }
       $("#brushtask_seedsize").removeClass("is-invalid");
+    }
+    //下载耗时
+    var brushtask_dltime_do = $("#brushtask_dltime_do").val();
+    var brushtask_dltime = $("#brushtask_dltime").val();
+    if(brushtask_dltime_do && !brushtask_dltime){
+      $("#brushtask_dltime").addClass("is-invalid");
+      return;
+    } else {
+      if(brushtask_dltime && isNaN(brushtask_dltime)){
+        $("#brushtask_dltime").addClass("is-invalid");
+        return;
+      }
+      $("#brushtask_dltime").removeClass("is-invalid");
+    }
+    //上传速度
+    var brushtask_avg_upspeed_do = $("#brushtask_avg_upspeed_do").val();
+    var brushtask_avg_upspeed = $("#brushtask_avg_upspeed").val();
+    if(brushtask_avg_upspeed_do && !brushtask_avg_upspeed){
+      $("#brushtask_avg_upspeed").addClass("is-invalid");
+      return;
+    } else {
+      if(brushtask_avg_upspeed && isNaN(brushtask_avg_upspeed)){
+        $("#brushtask_avg_upspeed").addClass("is-invalid");
+        return;
+      }
+      $("#brushtask_avg_upspeed").removeClass("is-invalid");
     }
 
     // 参数
@@ -614,9 +721,12 @@
       brushtask_include: brushtask_include,
       brushtask_exclude: brushtask_exclude,
       brushtask_dlcount: brushtask_dlcount,
+      brushtask_peercount: brushtask_peercount,
       brushtask_seedtime: brushtask_seedtime_do + "#" + brushtask_seedtime,
       brushtask_seedratio: brushtask_seedratio_do + "#" + brushtask_seedratio,
-      brushtask_seedsize: brushtask_seedsize_do + "#" + brushtask_seedsize
+      brushtask_seedsize: brushtask_seedsize_do + "#" + brushtask_seedsize,
+      brushtask_dltime: brushtask_dltime_do + "#" + brushtask_dltime,
+      brushtask_avg_upspeed: brushtask_avg_upspeed_do + "#" + brushtask_avg_upspeed
     };
 
     ajax_post("add_brushtask", params, function(ret){

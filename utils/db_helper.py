@@ -3,8 +3,9 @@ import threading
 
 import log
 from config import Config
-from utils.functions import singleton
+from utils.commons import singleton
 from utils.db_pool import DBPool
+from utils.path_utils import PathUtils
 
 lock = threading.Lock()
 
@@ -19,14 +20,14 @@ class DBHelper:
         self.init_config()
         self.__init_tables()
         self.__cleardata()
+        self.__initdata()
 
     def init_config(self):
         config = Config()
-        config_path = config.get_config_path()
-        if not config_path:
+        if not config.get_config_path():
             log.console("【ERROR】NASTOOL_CONFIG 环境变量未设置，程序无法工作，正在退出...")
             quit()
-        self.__db_path = os.path.join(os.path.dirname(config_path), 'user.db')
+        self.__db_path = os.path.join(config.get_config_path(), 'user.db')
         self.__pools = DBPool(
             max_active=5, max_wait=20, init_size=5, db_type="SQLite3",
             **{'database': self.__db_path, 'check_same_thread': False, 'timeout': 15})
@@ -161,17 +162,24 @@ class DBHelper:
                                    EXCLUDE  TEXT,
                                    SIZE    TEXT,
                                    NOTE    TEXT);''')
-            # 搜索过滤规则表
-            cursor.execute('''CREATE TABLE IF NOT EXISTS CONFIG_SEARCH_RULE
+            # 过滤规则组表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS CONFIG_FILTER_GROUP
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   GROUP_NAME  TEXT,
+                                   IS_DEFAULT    TEXT,
+                                   NOTE    TEXT);''')
+            # 过滤规则明细
+            cursor.execute('''CREATE TABLE IF NOT EXISTS CONFIG_FILTER_RULES
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   GROUP_ID  TEXT,
+                                   ROLE_NAME  TEXT,
+                                   PRIORITY  TEXT,                                   
                                    INCLUDE  TEXT,
                                    EXCLUDE  TEXT,
-                                   SIZE    TEXT,
+                                   SIZE_LIMIT    TEXT,
                                    NOTE    TEXT);''')
-            # RSS全局规则表
-            cursor.execute('''CREATE TABLE IF NOT EXISTS CONFIG_RSS_RULE
-                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
-                                   NOTE    TEXT);''')
+            cursor.execute(
+                '''CREATE INDEX IF NOT EXISTS INDX_CONFIG_FILTER_RULES_GROUP ON CONFIG_FILTER_RULES (GROUP_ID);''')
             # 目录同步记录表
             cursor.execute('''CREATE TABLE IF NOT EXISTS SYNC_HISTORY
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
@@ -186,14 +194,6 @@ class DBHelper:
                                    PASSWORD    TEXT,
                                    PRIS    TEXT);''')
             cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_CONFIG_USERS ON CONFIG_USERS (NAME);''')
-            # 消息中心
-            cursor.execute('''CREATE TABLE IF NOT EXISTS MESSAGES
-                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
-                                   LEVEL    TEXT,
-                                   TITLE    TEXT,
-                                   CONTENT    TEXT,
-                                   DATE     TEXT);''')
-            cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_MESSAGES_DATE ON MESSAGES (DATE);''')
             # 站点流量历史
             cursor.execute('''CREATE TABLE IF NOT EXISTS SITE_STATISTICS_HISTORY
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
@@ -209,11 +209,29 @@ class DBHelper:
                                    BONUS     REAL default 0.0,
                                    URL     TEXT);''')
 
-            cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_SITE_STATISTICS_HISTORY_DS ON SITE_STATISTICS_HISTORY (DATE, URL);''')
+            cursor.execute(
+                '''CREATE INDEX IF NOT EXISTS INDX_SITE_STATISTICS_HISTORY_DS ON SITE_STATISTICS_HISTORY (DATE, URL);''')
             # 唯一约束
-            cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_STATISTICS_HISTORY_DS ON SITE_STATISTICS_HISTORY (DATE, URL);''')
+            cursor.execute(
+                '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_STATISTICS_HISTORY_DS ON SITE_STATISTICS_HISTORY (DATE, URL);''')
+
+            # 实时站点做种数据
+            cursor.execute('''CREATE TABLE IF NOT EXISTS SITE_USER_SEEDING_INFO
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   SITE    TEXT,
+                                   SEEDING_INFO TEXT default '[]',
+                                   UPDATE_AT TEXT,
+                                   URL     TEXT);''')
+            cursor.execute(
+                '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_SEEDING_INFO_URL ON SITE_USER_SEEDING_INFO (URL);''')
+            cursor.execute(
+                '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_SEEDING_INFO_SITE ON SITE_USER_SEEDING_INFO (SITE);''')
+            # 唯一约束
+            cursor.execute(
+                '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_USER_SEEDING_INFO_URL ON SITE_USER_SEEDING_INFO (URL);''')
+
             # 实时站点数据
-            cursor.execute('''CREATE TABLE IF NOT EXISTS SITE_USER_STATISTICS
+            cursor.execute('''CREATE TABLE IF NOT EXISTS SITE_USER_INFO_STATS
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
                                    SITE    TEXT,
                                    USERNAME    TEXT,
@@ -227,14 +245,17 @@ class DBHelper:
                                    LEECHING     INTEGER,
                                    SEEDING_SIZE     INTEGER,
                                    BONUS     REAL,
-                                   URL     TEXT);''')
+                                   URL     TEXT,
+                                   FAVICON TEXT,
+                                   MSG_UNREAD INTEGER,
+                                   EXT_INFO TEXT);''')
             cursor.execute(
-                '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_STATISTICS_URL ON SITE_USER_STATISTICS (URL);''')
+                '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_INFO_STATS_URL ON SITE_USER_INFO_STATS (URL);''')
             cursor.execute(
-                '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_STATISTICS_SITE ON SITE_USER_STATISTICS (SITE);''')
+                '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_INFO_STATS_SITE ON SITE_USER_INFO_STATS (SITE);''')
             # 唯一约束
             cursor.execute(
-                '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_USER_STATISTICS_URL ON SITE_USER_STATISTICS (URL);''')
+                '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_USER_INFO_STATS_URL ON SITE_USER_INFO_STATS (URL);''')
             # 下载历史
             cursor.execute('''CREATE TABLE IF NOT EXISTS DOWNLOAD_HISTORY
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
@@ -281,7 +302,8 @@ class DBHelper:
                                    DOWNLOADER     TEXT,
                                    DOWNLOAD_ID    TEXT,
                                    LST_MOD_DATE     TEXT);''')
-            cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_SITE_BRUSH_TORRENTS_TASKID ON SITE_BRUSH_TORRENTS (TASK_ID);''')
+            cursor.execute(
+                '''CREATE INDEX IF NOT EXISTS INDX_SITE_BRUSH_TORRENTS_TASKID ON SITE_BRUSH_TORRENTS (TASK_ID);''')
             # 自定义下载器表
             cursor.execute('''CREATE TABLE IF NOT EXISTS SITE_BRUSH_DOWNLOADERS
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
@@ -302,80 +324,95 @@ class DBHelper:
             cursor.close()
             self.__pools.free(conn)
 
-    def excute(self, sql, data):
+    def __cleardata(self):
+        self.excute(
+            """DELETE FROM SITE_USER_INFO_STATS 
+                WHERE EXISTS (SELECT 1 
+                    FROM SITE_USER_INFO_STATS p2 
+                    WHERE SITE_USER_INFO_STATS.URL = p2.URL 
+                    AND SITE_USER_INFO_STATS.rowid < p2.rowid);""")
+        self.excute(
+            """DELETE FROM SITE_STATISTICS_HISTORY 
+                WHERE EXISTS (SELECT 1 
+                    FROM SITE_STATISTICS_HISTORY p2 
+                    WHERE SITE_STATISTICS_HISTORY.URL = p2.URL 
+                    AND SITE_STATISTICS_HISTORY.DATE = p2.DATE 
+                    AND SITE_STATISTICS_HISTORY.rowid < p2.rowid);""")
+
+    def __initdata(self):
+        config = Config().get_config()
+        init_files = config.get("app", {}).get("init_files") or []
+        config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "config")
+        sql_files = PathUtils.get_dir_level1_files(in_path=config_dir, exts=".sql")
+        config_flag = False
+        for sql_file in sql_files:
+            if os.path.basename(sql_file) not in init_files:
+                config_flag = True
+                with open(sql_file, "r", encoding="utf-8") as f:
+                    sql_list = f.read().split(';\n')
+                    for sql in sql_list:
+                        self.excute(sql)
+                init_files.append(os.path.basename(sql_file))
+        if config_flag:
+            config['app']['init_files'] = init_files
+            Config().save_config(config)
+
+    def excute(self, sql, data=None):
         if not sql:
             return False
-        conn = self.__pools.get()
-        cursor = conn.cursor()
-        try:
-            if data:
-                cursor.execute(sql, data)
-            else:
-                cursor.execute(sql)
-            conn.commit()
-        except Exception as e:
-            log.error(f"【DB】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
-            return False
-        finally:
-            cursor.close()
-            self.__pools.free(conn)
-        return True
+        with lock:
+            conn = self.__pools.get()
+            cursor = conn.cursor()
+            try:
+                if data:
+                    cursor.execute(sql, data)
+                else:
+                    cursor.execute(sql)
+                conn.commit()
+            except Exception as e:
+                log.error(f"【DB】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
+                return False
+            finally:
+                cursor.close()
+                self.__pools.free(conn)
+            return True
 
     def excute_many(self, sql, data_list):
         if not sql or not data_list:
             return False
-        conn = self.__pools.get()
-        cursor = conn.cursor()
-        try:
-            cursor.executemany(sql, data_list)
-            conn.commit()
-        except Exception as e:
-            log.error(f"【DB】执行SQL出错：sql:{sql}; {e}")
-            return False
-        finally:
-            cursor.close()
-            self.__pools.free(conn)
-        return True
+        with lock:
+            conn = self.__pools.get()
+            cursor = conn.cursor()
+            try:
+                cursor.executemany(sql, data_list)
+                conn.commit()
+            except Exception as e:
+                log.error(f"【DB】执行SQL出错：sql:{sql}; {e}")
+                return False
+            finally:
+                cursor.close()
+                self.__pools.free(conn)
+            return True
 
     def select(self, sql, data):
         if not sql:
             return False
-        conn = self.__pools.get()
-        cursor = conn.cursor()
-        try:
-            if data:
-                res = cursor.execute(sql, data)
-            else:
-                res = cursor.execute(sql)
-            ret = res.fetchall()
-        except Exception as e:
-            log.error(f"【DB】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
-            return []
-        finally:
-            cursor.close()
-            self.__pools.free(conn)
-        return ret
-
-    def __cleardata(self):
-        conn = self.__pools.get()
-        cursor = conn.cursor()
-        try:
-            # 删除站点重复数据
-            cursor.execute(
-                """DELETE FROM SITE_USER_STATISTICS WHERE EXISTS (SELECT 1 FROM SITE_USER_STATISTICS p2 WHERE SITE_USER_STATISTICS.URL = p2.URL AND SITE_USER_STATISTICS.rowid < p2.rowid);""")
-            conn.commit()
-            cursor.execute(
-                """DELETE FROM SITE_STATISTICS_HISTORY WHERE EXISTS (SELECT 1 FROM SITE_STATISTICS_HISTORY p2 WHERE SITE_STATISTICS_HISTORY.URL = p2.URL and SITE_STATISTICS_HISTORY.DATE = p2.DATE AND SITE_STATISTICS_HISTORY.rowid < p2.rowid);""")
-            conn.commit()
-            # 删除系统消息表数据
-            cursor.execute(
-                """DELETE FROM MESSAGES""")
-            conn.commit()
-        except Exception as e:
-            print(str(e))
-        finally:
-            cursor.close()
-            self.__pools.free(conn)
+        with lock:
+            conn = self.__pools.get()
+            cursor = conn.cursor()
+            try:
+                if data:
+                    res = cursor.execute(sql, data)
+                else:
+                    res = cursor.execute(sql)
+                ret = res.fetchall()
+            except Exception as e:
+                log.error(f"【DB】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
+                return []
+            finally:
+                cursor.close()
+                self.__pools.free(conn)
+            return ret
 
 
 def select_by_sql(sql, data=None):

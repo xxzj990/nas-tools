@@ -3,14 +3,13 @@
 import logging
 import os
 import time
+from functools import lru_cache
 
 import requests
 import requests.exceptions
 
 from .as_obj import AsObj
 from .exceptions import TMDbException
-
-from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,7 @@ class TMDb(object):
     TMDB_DEBUG_ENABLED = "TMDB_DEBUG_ENABLED"
     TMDB_CACHE_ENABLED = "TMDB_CACHE_ENABLED"
     TMDB_PROXIES = "TMDB_PROXIES"
-    REQUEST_CACHE_MAXSIZE = 512
+    REQUEST_CACHE_MAXSIZE = 128
 
     def __init__(self, obj_cached=True, session=None):
         self._session = requests.Session() if session is None else session
@@ -145,7 +144,7 @@ class TMDb(object):
         if self.cache and self.obj_cached and call_cached and method != "POST":
             req = self.cached_request(method, url, data, self.proxies)
         else:
-            req = self._session.request(method, url, data=data, proxies=eval(self.proxies))
+            req = self._session.request(method, url, data=data, proxies=eval(self.proxies), timeout=5)
 
         headers = req.headers
 

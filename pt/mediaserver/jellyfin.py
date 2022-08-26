@@ -1,11 +1,12 @@
 import re
+
 import log
 from config import Config
 from pt.mediaserver.server import IMediaServer
 from rmt.meta.metabase import MetaBase
-from utils.functions import singleton, get_local_time
+from utils.commons import singleton
 from utils.http_utils import RequestUtils
-from utils.types import MediaType
+from utils.system_utils import SystemUtils
 
 
 @singleton
@@ -22,12 +23,14 @@ class Jellyfin(IMediaServer):
         jellyfin = config.get_config('jellyfin')
         if jellyfin:
             self.__host = jellyfin.get('host')
-            if not self.__host.startswith('http://') and not self.__host.startswith('https://'):
-                self.__host = "http://" + self.__host
-            if not self.__host.endswith('/'):
-                self.__host = self.__host + "/"
+            if self.__host:
+                if not self.__host.startswith('http://') and not self.__host.startswith('https://'):
+                    self.__host = "http://" + self.__host
+                if not self.__host.endswith('/'):
+                    self.__host = self.__host + "/"
             self.__apikey = jellyfin.get('api_key')
-            self.get_admin_user()
+            if self.__host and self.__apikey:
+                self.__user = self.get_admin_user()
 
     def get_status(self):
         """
@@ -76,7 +79,7 @@ class Jellyfin(IMediaServer):
         获得管理员用户
         """
         if not self.__host or not self.__apikey:
-            return
+            return None
         req_url = "%sUsers?api_key=%s" % (self.__host, self.__apikey)
         try:
             res = RequestUtils().get_res(req_url)
@@ -84,12 +87,12 @@ class Jellyfin(IMediaServer):
                 users = res.json()
                 for user in users:
                     if user.get("Policy", {}).get("IsAdministrator"):
-                        self.__user = user.get("Id")
-                        break
+                        return user.get("Id")
             else:
                 log.error("【JELLYFIN】Users 未获取到返回数据")
         except Exception as e:
             log.error("【JELLYFIN】连接Users出错：" + str(e))
+        return None
 
     def get_activity_log(self, num):
         """
@@ -109,12 +112,14 @@ class Jellyfin(IMediaServer):
                         event_type = "LG"
                         event_date = re.sub(r'\dZ', 'Z', item.get("Date"))
                         event_str = "%s, %s" % (item.get("Name"), item.get("ShortOverview"))
-                        activity = {"type": event_type, "event": event_str, "date": get_local_time(event_date)}
+                        activity = {"type": event_type, "event": event_str,
+                                    "date": SystemUtils.get_local_time(event_date)}
                         ret_array.append(activity)
                     if item.get("Type") == "VideoPlayback":
                         event_type = "PL"
                         event_date = re.sub(r'\dZ', 'Z', item.get("Date"))
-                        activity = {"type": event_type, "event": item.get("Name"), "date": get_local_time(event_date)}
+                        activity = {"type": event_type, "event": item.get("Name"),
+                                    "date": SystemUtils.get_local_time(event_date)}
                         ret_array.append(activity)
             else:
                 log.error("【JELLYFIN】System/ActivityLog/Entries 未获取到返回数据")
@@ -301,8 +306,12 @@ class Jellyfin(IMediaServer):
         req_url = "%sLibrary/Refresh?api_key=%s" % (self.__host, self.__apikey)
         try:
             res = RequestUtils().post_res(req_url)
-            if res:
+            if res and res.status_code == 200:
                 return True
+            elif res:
+                log.info(f"【JELLYFIN】刷新媒体库返回码：{res.status_code}，返回内容：{res.reason}")
+            else:
+                log.info(f"【JELLYFIN】刷新媒体库失败，无法连接Jellyfin！")
         except Exception as e:
             log.error("【JELLYFIN】连接Library/Refresh出错：" + str(e))
             return False
@@ -318,27 +327,3 @@ class Jellyfin(IMediaServer):
         if not self.__host or not self.__apikey:
             return False
         return self.refresh_root_library()
-
-    def __get_jellyfin_library_id_by_item(self, item):
-        """
-        根据媒体信息查询在哪个媒体库，返回要刷新的位置的ID
-        :param item: 由title、year、type组成的字典
-        """
-        if not item.get("title") or not item.get("year") or not item.get("type"):
-            return None
-        if item.get("type") == MediaType.TV:
-            item_id = self.__get_jellyfin_series_id_by_name(item.get("title"), item.get("year"))
-            if item_id:
-                # 存在电视剧，则直接刷新这个电视剧就行
-                return item_id
-        else:
-            if self.get_movies(item.get("title"), item.get("year")):
-                # 已存在，不用刷新
-                return None
-        # 查找需要刷新的媒体库ID
-        for library in self.__get_jellyfin_librarys():
-            for folder in library.get("Path"):
-                if "/%s" % item.get("category") in folder.get("Path"):
-                    return library.get("Id")
-        # 刷新根目录
-        return "/"

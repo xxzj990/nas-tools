@@ -1,140 +1,41 @@
+import random
 import re
 from functools import lru_cache
+from time import sleep
 from urllib import parse
+
+import bencode
 import cn2an
 from lxml import etree
+
 from config import TORRENT_SEARCH_PARAMS
 from pt.siteconf import RSS_SITE_GRAP_CONF
 from rmt.meta.metabase import MetaBase
 from utils.http_utils import RequestUtils
 from utils.types import MediaType
-import bencode
+
+
+class TorrentAttr:
+    def __init__(self):
+        self.free = None
+        self.free2x = None
+        self.peer_count = 0
+        self.hr = None
+
+    def __str__(self):
+        return "free: {}, free2x: {}, peer_count: {}, hr: {}".format(self.free, self.free2x, self.peer_count, self.hr)
+
+    def is_free(self):
+        return not (not self.free) or not (not self.free2x)
+
+    def is_free2x(self):
+        return not (not self.free2x)
+
+    def is_hr(self):
+        return not (not self.hr)
 
 
 class Torrent:
-
-    def is_torrent_match_rss(self, media_info, movie_keys, tv_keys, site_name):
-        """
-        判断种子是否命中订阅
-        :param media_info: 已识别的种子媒体信息
-        :param movie_keys: 电影订阅清单
-        :param tv_keys: 电视剧订阅清单
-        :param site_name: 站点名称
-        :return: 匹配到的订阅ID、是否洗版、总集数
-        """
-        if media_info.type == MediaType.MOVIE:
-            for key_info in movie_keys:
-                if not key_info:
-                    continue
-                name = key_info[0]
-                year = key_info[1]
-                tmdbid = key_info[2]
-                rssid = key_info[6]
-                # 订阅站点，是否洗板，过滤字典
-                sites, _, over_edition, filter_map = self.get_rss_note_item(key_info[4])
-                # 过滤订阅站点
-                if sites and site_name not in sites:
-                    continue
-                # 过滤字典
-                if filter_map and not Torrent.check_torrent_filter(media_info, filter_map):
-                    continue
-                # 有tmdbid时精确匹配
-                if tmdbid:
-                    # 匹配名称、年份，年份可以没有
-                    if name == media_info.title and (not year or str(year) == str(media_info.year)) \
-                            or str(media_info.tmdb_id) == str(tmdbid):
-                        return rssid, over_edition, None
-                # 模糊匹配
-                else:
-                    # 匹配年份
-                    if year and str(year) != str(media_info.year):
-                        continue
-                    # 匹配关键字，可能是正则表达式
-                    if re.search(r"%s" % name,
-                                 "%s %s %s" % (media_info.org_string, media_info.title, media_info.year),
-                                 re.IGNORECASE):
-                        return 0, False, None
-        else:
-            # 匹配种子标题
-            for key_info in tv_keys:
-                if not key_info:
-                    continue
-                name = key_info[0]
-                year = key_info[1]
-                season = key_info[2]
-                tmdbid = key_info[3]
-                rssid = key_info[10]
-                total = key_info[6]
-                # 订阅站点
-                sites, _, over_edition, filter_map = self.get_rss_note_item(key_info[5])
-                # 过滤订阅站点
-                if sites and site_name not in sites:
-                    continue
-                # 过滤字典
-                if filter_map and not Torrent.check_torrent_filter(media_info, filter_map):
-                    continue
-                # 有tmdbid时精确匹配
-                if tmdbid:
-                    # 匹配季，季可以为空
-                    if season and season != media_info.get_season_string():
-                        continue
-                    # 匹配年份，年份可以为空
-                    if year and str(year) != str(media_info.year):
-                        continue
-                    # 匹配名称
-                    if name == media_info.title or str(media_info.tmdb_id) == str(tmdbid):
-                        return rssid, over_edition, total
-                # 模糊匹配
-                else:
-                    # 匹配季
-                    if season and season != "S00" and season != media_info.get_season_string():
-                        continue
-                    # 匹配年份
-                    if year and str(year) != str(media_info.year):
-                        continue
-                    # 匹配关键字，可能是正则表达式
-                    if re.search(r"%s" % name,
-                                 "%s %s %s" % (media_info.org_string, media_info.title, media_info.year),
-                                 re.IGNORECASE):
-                        return 0, False, None
-        return None, None, None
-
-    @staticmethod
-    def is_torrent_match_size(media_info, types, t_size):
-        """
-        判断种子大子是否与配置匹配，只针对电影
-        :param media_info: 已识别好的种子媒体信息
-        :param types: 配置中的过滤规则
-        :param t_size: 种子大小
-        :return: 是否命中
-        """
-        if media_info.type != MediaType.MOVIE:
-            return True
-        if not isinstance(types, dict):
-            return True
-        # 大小
-        if t_size:
-            sizes = types.get('size')
-            if sizes:
-                if sizes.find(',') != -1:
-                    sizes = sizes.split(',')
-                    if sizes[0].isdigit():
-                        begin_size = int(sizes[0].strip())
-                    else:
-                        begin_size = 0
-                    if sizes[1].isdigit():
-                        end_size = int(sizes[1].strip())
-                    else:
-                        end_size = 0
-                else:
-                    begin_size = 0
-                    if sizes.isdigit():
-                        end_size = int(sizes.strip())
-                    else:
-                        end_size = 0
-                if not begin_size * 1024 * 1024 * 1024 <= int(t_size) <= end_size * 1024 * 1024 * 1024:
-                    return False
-        return True
 
     @staticmethod
     def is_torrent_match_sey(media_info, s_num, e_num, year_str):
@@ -163,78 +64,6 @@ class Torrent:
                 return False
         return True
 
-    @classmethod
-    def check_site_resouce_filter(cls, title, subtitle, types):
-        """
-        检查种子是否匹配站点过滤规则：排除规则、包含规则，优先规则
-        :param title: 种子标题
-        :param subtitle: 种子副标题
-        :param types: 配置文件中的配置规则
-        :return: 是否匹配，匹配的优先值，值越大越优先
-        """
-        if not types:
-            # 未配置默认不过滤
-            return True, 0
-        if not isinstance(types, dict):
-            return True, 0
-        if not title:
-            return False, 0
-        # 必须包括的项
-        includes = types.get('include')
-        if includes:
-            if isinstance(includes, str):
-                includes = [includes]
-            include_flag = True
-            for include in includes:
-                if not include:
-                    continue
-                re_res = re.search(r'%s' % include.strip(), title, re.IGNORECASE)
-                if not re_res:
-                    include_flag = False
-            if not include_flag:
-                return False, 0
-
-        # 不能包含的项
-        excludes = types.get('exclude')
-        if excludes:
-            if isinstance(excludes, str):
-                excludes = [excludes]
-            exclude_flag = False
-            exclude_count = 0
-            for exclude in excludes:
-                if not exclude:
-                    continue
-                exclude_count += 1
-                re_res = re.search(r'%s' % exclude.strip(), title, re.IGNORECASE)
-                if not re_res:
-                    exclude_flag = True
-            if exclude_count != 0 and not exclude_flag:
-                return False, 0
-
-        return True, cls.check_site_resouce_order(title, subtitle, types)
-
-    @staticmethod
-    def check_site_resouce_order(title, subtitle, types):
-        """
-        检查种子是否匹配站点的优先规则
-        :param title: 种子标题
-        :param subtitle: 种子副标题
-        :param types: 配置文件中的配置规则
-        :return: 匹配的优先顺序
-        """
-        res_order = 0
-        if not types:
-            return res_order
-        notes = types.get('note')
-        if notes:
-            res_seq = 100
-            for note in notes:
-                res_seq = res_seq - 1
-                if re.search(r"%s" % note, "%s%s" % (title, subtitle), re.IGNORECASE):
-                    res_order = res_seq
-                    break
-        return res_order
-
     @staticmethod
     def get_keyword_from_string(content):
         """
@@ -261,7 +90,7 @@ class Torrent:
             mtype = MediaType.TV
             episode_num = int(cn2an.cn2an(episode_re.group(1), mode='smart'))
             if episode_num and not season_num:
-                season_num = "1"
+                season_num = 1
         year_re = re.search(r"[\s(]+(\d{4})[\s)]*", content)
         if year_re:
             year = year_re.group(1)
@@ -277,14 +106,14 @@ class Torrent:
 
     @staticmethod
     @lru_cache(maxsize=128)
-    def check_torrent_attr(torrent_url, cookie) -> list:
+    def check_torrent_attr(torrent_url, cookie) -> TorrentAttr:
         """
-        检验种子是否免费
+        检验种子是否免费，当前做种人数
         :param torrent_url: 种子的详情页面
         :param cookie: 站点的Cookie
-        :return: 促销类型 FREE 2XFREE HR 的数组
+        :return: 种子属性，包含FREE 2XFREE HR PEER_COUNT等属性
         """
-        ret_attr = []
+        ret_attr = TorrentAttr()
         if not torrent_url:
             return ret_attr
         url_host = parse.urlparse(torrent_url).netloc
@@ -298,38 +127,48 @@ class Torrent:
             res.encoding = res.apparent_encoding
             html_text = res.text
             if not html_text:
-                return []
+                return ret_attr
             try:
                 html = etree.HTML(html_text)
                 # 检测2XFREE
                 for xpath_str in xpath_strs.get("2XFREE"):
                     if html.xpath(xpath_str):
-                        ret_attr.append("FREE")
-                        ret_attr.append("2XFREE")
+                        ret_attr.free = True
+                        ret_attr.free2x = True
                 # 检测FREE
                 for xpath_str in xpath_strs.get("FREE"):
                     if html.xpath(xpath_str):
-                        ret_attr.append("FREE")
+                        ret_attr.free = True
                 # 检测HR
                 for xpath_str in xpath_strs.get("HR"):
                     if html.xpath(xpath_str):
-                        ret_attr.append("HR")
+                        ret_attr.hr = True
+                # 检测PEER_COUNT当前做种人数
+                for xpath_str in xpath_strs.get("PEER_COUNT"):
+                    peer_count_dom = html.xpath(xpath_str)
+                    if peer_count_dom:
+                        peer_count_str = peer_count_dom[0].text
+                        peer_count_str_re = re.search(r'^(\d+)', peer_count_str)
+                        ret_attr.peer_count = int(peer_count_str_re.group(1)) if peer_count_str_re else 0
             except Exception as err:
                 print(err)
+        # 随机休眼后再返回
+        sleep(round(random.uniform(1, 5), 1))
         return ret_attr
 
     @staticmethod
-    def get_torrent_content(url):
+    def get_torrent_content(url, cookie=None):
         """
         把种子下载到本地，返回种子内容
         :param url: 种子链接
+        :param cookie: 站点Cookie
         """
         if not url:
             return None, "URL为空"
         try:
             if url.startswith("magnet:"):
                 return url, "磁力链接"
-            req = RequestUtils().get_res(url=url)
+            req = RequestUtils(cookies=cookie).get_res(url=url)
             if req and req.status_code == 200:
                 if not req.content:
                     return None, "未下载到种子数据"
@@ -371,14 +210,16 @@ class Torrent:
                 return False
             if downloadvolumefactor and dl_factor not in ("*", str(downloadvolumefactor)):
                 return False
-        if filter_args.get("key") and not re.search(r"%s" % filter_args.get("key"), meta_info.org_string, re.IGNORECASE):
+        if filter_args.get("key") and not re.search(r"%s" % filter_args.get("key"),
+                                                    meta_info.org_string,
+                                                    re.IGNORECASE):
             return False
         return True
 
     @staticmethod
     def get_rss_note_item(desc):
         """
-        解析订阅的NOTE字段，从中获取订阅站点、搜索站点、是否洗版、订阅质量、订阅分辨率、过滤关键字等信息
+        解析订阅的NOTE字段，从中获取订阅站点、搜索站点、是否洗版、订阅质量、订阅分辨率、过滤规则等信息
         DESC字段组成：RSS站点#搜索站点#是否洗版(Y/N)#过滤条件，站点用|分隔多个站点，过滤条件用@分隔多个条件
         :param desc: RSS订阅DESC字段的值
         :return: 订阅站点、搜索站点、是否洗版、过滤字典
@@ -390,7 +231,7 @@ class Torrent:
         over_edition = False
         rss_restype = None
         rss_pix = None
-        rss_keyword = None
+        rss_rule = None
         notes = str(desc).split('#')
         # 订阅站点
         if len(notes) > 0:
@@ -415,6 +256,6 @@ class Torrent:
                 if len(filters) > 1:
                     rss_pix = filters[1]
                 if len(filters) > 2:
-                    rss_keyword = filters[2]
+                    rss_rule = filters[2]
 
-        return rss_sites, search_sites, over_edition, {"restype": rss_restype, "pix": rss_pix, "key": rss_keyword}
+        return rss_sites, search_sites, over_edition, {"restype": rss_restype, "pix": rss_pix, "rule": rss_rule}

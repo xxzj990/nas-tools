@@ -1,9 +1,14 @@
+import re
 from functools import lru_cache
+
+import cn2an
+
 import log
-from config import FANART_TV_API_URL, FANART_MOVIE_API_URL, ANIME_GENREIDS, Config, DEFAULT_TMDB_IMAGE
+from config import FANART_TV_API_URL, FANART_MOVIE_API_URL, ANIME_GENREIDS, Config, DEFAULT_TMDB_IMAGE, \
+    TMDB_IMAGE_W500_URL
 from rmt.category import Category
-from utils.functions import is_all_chinese
 from utils.http_utils import RequestUtils
+from utils.string_utils import StringUtils
 from utils.types import MediaType
 
 
@@ -13,6 +18,8 @@ class MetaBase(object):
     """
     proxies = None
     category_handler = None
+    # 是否处理的文件
+    fileflag = False
     # 原字符串
     org_string = None
     # 副标题
@@ -63,6 +70,7 @@ class MetaBase(object):
     backdrop_path = None
     poster_path = None
     fanart_image = None
+    fanart_flag = False
     # 评分
     vote_average = 0
     # 描述
@@ -79,11 +87,18 @@ class MetaBase(object):
     peers = 0
     description = None
     page_url = None
-    upload_volume_factor = 1.0
-    download_volume_factor = 1.0
+    upload_volume_factor = None
+    download_volume_factor = None
+    hit_and_run = None
     rssid = None
+    # 副标题解析
+    _subtitle_flag = False
+    _subtitle_season_re = r"[第\s]+([0-9一二三四五六七八九十S\-]+)\s*季"
+    _subtitle_season_all_re = r"全\s*([0-9一二三四五六七八九十]+)\s*季|([0-9一二三四五六七八九十]+)\s*季全"
+    _subtitle_episode_re = r"[第\s]+([0-9一二三四五六七八九十EP\-]+)\s*[集话話]"
+    _subtitle_episode_all_re = r"([0-9一二三四五六七八九十]+)\s*集全|全\s*([0-9一二三四五六七八九十]+)\s*集"
 
-    def __init__(self, title, subtitle=None):
+    def __init__(self, title, subtitle=None, fileflag=False):
         if not title:
             return
         config = Config()
@@ -91,9 +106,10 @@ class MetaBase(object):
         self.category_handler = Category()
         self.org_string = title
         self.subtitle = subtitle
+        self.fileflag = fileflag
 
     def get_name(self):
-        if self.cn_name and is_all_chinese(self.cn_name):
+        if self.cn_name and StringUtils.is_all_chinese(self.cn_name):
             return self.cn_name
         elif self.en_name:
             return self.en_name
@@ -302,6 +318,8 @@ class MetaBase(object):
 
     # 返回促销信息
     def get_volume_factor_string(self):
+        if self.upload_volume_factor is None or self.download_volume_factor is None:
+            return "未知"
         free_strs = {
             "1.0 1.0": "普通",
             "1.0 0.0": "免费",
@@ -312,7 +330,7 @@ class MetaBase(object):
             "1.0 0.7": "70%",
             "1.0 0.3": "30%"
         }
-        return free_strs.get('%.1f %.1f' % (self.upload_volume_factor, self.download_volume_factor), "普通")
+        return free_strs.get('%.1f %.1f' % (self.upload_volume_factor, self.download_volume_factor), "未知")
 
     # 是否包含季
     def is_in_season(self, season):
@@ -381,23 +399,23 @@ class MetaBase(object):
                 self.category = self.category_handler.get_tv_category(info)
             else:
                 self.category = self.category_handler.get_anime_category(info)
-        self.poster_path = "https://image.tmdb.org/t/p/w500%s" % info.get('poster_path') if info.get(
+        self.poster_path = TMDB_IMAGE_W500_URL % info.get('poster_path') if info.get(
             'poster_path') else ""
-        self.backdrop_path = "https://image.tmdb.org/t/p/w500%s" % info.get('backdrop_path') if info.get(
+        self.backdrop_path = TMDB_IMAGE_W500_URL % info.get('backdrop_path') if info.get(
             'backdrop_path') else ""
 
     # 刷新Fanart图片
     def __refresh_fanart_image(self):
         if not self.tmdb_id:
             return
-        if self.fanart_image:
+        if self.fanart_image or self.fanart_flag:
             return
         self.fanart_image = self.__get_fanart_image(search_type=self.type, tmdbid=self.tmdb_id)
+        self.fanart_flag = True
 
     # 获取Fanart图片
     def get_fanart_image(self):
-        if not self.fanart_image:
-            self.__refresh_fanart_image()
+        self.__refresh_fanart_image()
         return self.fanart_image
 
     # 整合种了信息
@@ -411,26 +429,41 @@ class MetaBase(object):
                          peers=0,
                          description=None,
                          page_url=None,
-                         upload_volume_factor=1.0,
-                         download_volume_factor=1.0,
-                         rssid=None):
-        self.site = site
-        self.site_order = site_order
-        self.enclosure = enclosure
-        self.res_order = res_order
-        self.size = size
-        self.seeders = seeders
-        self.peers = peers
-        self.description = description
-        self.page_url = page_url
-        self.upload_volume_factor = upload_volume_factor
-        self.download_volume_factor = download_volume_factor
-        self.rssid = rssid
+                         upload_volume_factor=None,
+                         download_volume_factor=None,
+                         rssid=None,
+                         hit_and_run=None):
+        if site:
+            self.site = site
+        if site_order:
+            self.site_order = site_order
+        if enclosure:
+            self.enclosure = enclosure
+        if res_order:
+            self.res_order = res_order
+        if size:
+            self.size = size
+        if seeders:
+            self.seeders = seeders
+        if peers:
+            self.peers = peers
+        if description:
+            self.description = description
+        if page_url:
+            self.page_url = page_url
+        if upload_volume_factor is not None:
+            self.upload_volume_factor = upload_volume_factor
+        if download_volume_factor is not None:
+            self.download_volume_factor = download_volume_factor
+        if rssid:
+            self.rssid = rssid
+        if hit_and_run is not None:
+            self.hit_and_run = hit_and_run
 
     # 获取消息媒体图片
     # 增加cache，优化资源检索时性能
     @classmethod
-    @lru_cache(maxsize=512)
+    @lru_cache(maxsize=128)
     def __get_fanart_image(cls, search_type, tmdbid, default=None):
         if not search_type:
             return ""
@@ -440,7 +473,7 @@ class MetaBase(object):
             else:
                 image_url = FANART_TV_API_URL % tmdbid
             try:
-                ret = RequestUtils(proxies=cls.proxies).get_res(image_url)
+                ret = RequestUtils(proxies=cls.proxies, timeout=5).get_res(image_url)
                 if ret:
                     moviethumbs = ret.json().get('moviethumb')
                     if moviethumbs:
@@ -475,3 +508,85 @@ class MetaBase(object):
                 return MediaType.TV
         else:
             return info.get('media_type')
+
+    def init_subtitle(self, title_text):
+        if not title_text:
+            return
+        if re.search(r'[全第季集话話]', title_text, re.IGNORECASE):
+            # 第x季
+            season_str = re.search(r'%s' % self._subtitle_season_re, title_text, re.IGNORECASE)
+            if season_str:
+                seasons = season_str.group(1)
+                if seasons:
+                    seasons = seasons.upper().replace("S", "").strip()
+                else:
+                    return
+                try:
+                    end_season = None
+                    if seasons.find('-') != -1:
+                        seasons = seasons.split('-')
+                        begin_season = int(cn2an.cn2an(seasons[0].strip(), mode='smart'))
+                        if len(seasons) > 1:
+                            end_season = int(cn2an.cn2an(seasons[1].strip(), mode='smart'))
+                    else:
+                        begin_season = int(cn2an.cn2an(seasons, mode='smart'))
+                except Exception as err:
+                    print(str(err))
+                    return
+                if self.begin_season is None and isinstance(begin_season, int):
+                    self.begin_season = begin_season
+                    self.total_seasons = 1
+                if self.begin_season is not None and self.end_season is None and isinstance(end_season, int):
+                    self.end_season = end_season
+                    self.total_seasons = (self.end_season - self.begin_season) + 1
+                self.type = MediaType.TV
+                self._subtitle_flag = True
+            # 第x集
+            episode_str = re.search(r'%s' % self._subtitle_episode_re, title_text, re.IGNORECASE)
+            if episode_str:
+                episodes = episode_str.group(1)
+                if episodes:
+                    episodes = episodes.upper().replace("E", "").replace("P", "").strip()
+                else:
+                    return
+                try:
+                    end_episode = None
+                    if episodes.find('-') != -1:
+                        episodes = episodes.split('-')
+                        begin_episode = int(cn2an.cn2an(episodes[0].strip(), mode='smart'))
+                        if len(episodes) > 1:
+                            end_episode = int(cn2an.cn2an(episodes[1].strip(), mode='smart'))
+                    else:
+                        begin_episode = int(cn2an.cn2an(episodes, mode='smart'))
+                except Exception as err:
+                    print(str(err))
+                    return
+                if self.begin_episode is None and isinstance(begin_episode, int):
+                    self.begin_episode = begin_episode
+                    self.total_episodes = 1
+                if self.begin_episode is not None and self.end_episode is None and isinstance(end_episode, int):
+                    self.end_episode = end_episode
+                    self.total_episodes = (self.end_episode - self.begin_episode) + 1
+                self.type = MediaType.TV
+                self._subtitle_flag = True
+            # x集全
+            episode_all_str = re.search(r'%s' % self._subtitle_episode_all_re, title_text, re.IGNORECASE)
+            if episode_all_str:
+                self.begin_episode = None
+                self.end_episode = None
+                self.total_episodes = 0
+            # 全x季 x季全
+            season_all_str = re.search(r"%s" % self._subtitle_season_all_re, title_text, re.IGNORECASE)
+            if season_all_str:
+                season_all = season_all_str.group(1)
+                if not season_all:
+                    season_all = season_all_str.group(2)
+                if season_all and self.begin_season is None and self.begin_episode is None:
+                    try:
+                        self.total_seasons = int(cn2an.cn2an(season_all.strip(), mode='smart'))
+                    except Exception as err:
+                        print(str(err))
+                        return
+                    self.begin_season = 1
+                    self.end_season = self.total_seasons
+                    self._subtitle_flag = True
