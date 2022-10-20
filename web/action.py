@@ -1,5 +1,7 @@
+import base64
 import datetime
 import importlib
+import json
 import os.path
 import re
 import shutil
@@ -10,30 +12,35 @@ from werkzeug.security import generate_password_hash
 
 import cn2an
 import log
-from app.media.doubanv2api import DoubanHot
+from app.doubansync import DoubanSync
+from app.helper.words_helper import WordsHelper
+from app.indexer import BuiltinIndexer
+from app.media.douban import DouBan
 from app.mediaserver import MediaServer
-from app.utils import StringUtils, Torrent, EpisodeFormat, ProgressController, RequestUtils, PathUtils, MessageCenter, ThreadHelper, MetaHelper
+from app.rsschecker import RssChecker
+from app.utils import StringUtils, Torrent, EpisodeFormat, RequestUtils, PathUtils, SystemUtils
+from app.helper import ProgressHelper, ThreadHelper, MetaHelper
+from app.utils.types import RMT_MODES
 from config import RMT_MEDIAEXT, Config, TMDB_IMAGE_W500_URL, TMDB_IMAGE_ORIGINAL_URL
-from app.message import Telegram, WeChat, Message
+from app.message import Telegram, WeChat, Message, MessageCenter
 from app.brushtask import BrushTask
 from app.downloader import Qbittorrent, Transmission, Downloader
-from app.douban import DouBan
 from app.filterrules import FilterRule
 from app.mediaserver import Emby, Jellyfin, Plex
 from app.rss import Rss
-from app.sites import SiteConf, Sites
+from app.sites import Sites
 from app.subtitle import Subtitle
 from app.media import Category, Media, MetaInfo
 from app.media.doubanv2api import DoubanApi
 from app.filetransfer import FileTransfer
-from app.scheduler import stop_scheduler, restart_scheduler
-from app.sync import stop_monitor, restart_monitor
+from app.scheduler import restart_scheduler, stop_scheduler
+from app.sync import restart_monitor, stop_monitor
 from app.scheduler import Scheduler
 from app.sync import Sync
 from app.utils.types import SearchType, DownloaderType, SyncType, MediaType, SystemDictType
 from web.backend.search_torrents import search_medias_for_web, search_media_by_message
-from web.backend.subscribe import add_rss_subscribe
-from app.db import SqlHelper, DictHelper
+from app.subscribe import Subscribe
+from app.helper import SqlHelper, DictHelper
 
 
 class WebAction:
@@ -46,6 +53,7 @@ class WebAction:
             "sch": self.__sch,
             "search": self.__search,
             "download": self.__download,
+            "download_link": self.__download_link,
             "pt_start": self.__pt_start,
             "pt_stop": self.__pt_stop,
             "pt_remove": self.__pt_remove,
@@ -78,6 +86,7 @@ class WebAction:
             "modify_tmdb_cache": self.__modify_tmdb_cache,
             "rss_detail": self.__rss_detail,
             "truncate_blacklist": self.__truncate_blacklist,
+            "truncate_rsshistory": self.__truncate_rsshistory,
             "add_brushtask": self.__add_brushtask,
             "del_brushtask": self.__del_brushtask,
             "brushtask_detail": self.__brushtask_detail,
@@ -88,6 +97,7 @@ class WebAction:
             "rule_test": self.__rule_test,
             "net_test": self.__net_test,
             "add_filtergroup": self.__add_filtergroup,
+            "restore_filtergroup": self.__restore_filtergroup,
             "set_default_filtergroup": self.__set_default_filtergroup,
             "del_filtergroup": self.__del_filtergroup,
             "add_filterrule": self.__add_filterrule,
@@ -101,11 +111,38 @@ class WebAction:
             "clear_tmdb_cache": self.__clear_tmdb_cache,
             "check_site_attr": self.__check_site_attr,
             "refresh_process": self.__refresh_process,
-            "get_download_dirs": self.get_download_dirs,
             "restory_backup": self.__restory_backup,
             "start_mediasync": self.__start_mediasync,
             "mediasync_state": self.__mediasync_state,
-            "get_tvseason_list": self.__get_tvseason_list
+            "get_tvseason_list": self.__get_tvseason_list,
+            "get_userrss_task": self.__get_userrss_task,
+            "delete_userrss_task": self.__delete_userrss_task,
+            "update_userrss_task": self.__update_userrss_task,
+            "get_rssparser": self.__get_rssparser,
+            "delete_rssparser": self.__delete_rssparser,
+            "update_rssparser": self.__update_rssparser,
+            "run_userrss": self.__run_userrss,
+            "run_brushtask": self.__run_brushtask,
+            "list_site_resources": self.__list_site_resources,
+            "list_rss_articles": self.__list_rss_articles,
+            "rss_article_test": self.__rss_article_test,
+            "list_rss_history": self.__list_rss_history,
+            "rss_articles_check": self.__rss_articles_check,
+            "rss_articles_download": self.__rss_articles_download,
+            "add_custom_word_group": self.__add_custom_word_group,
+            "delete_custom_word_group": self.__delete_custom_word_group,
+            "add_or_edit_custom_word": self.__add_or_edit_custom_word,
+            "get_custom_word": self.__get_custom_word,
+            "delete_custom_word": self.__delete_custom_word,
+            "check_custom_words": self.__check_custom_words,
+            "export_custom_words": self.__export_custom_words,
+            "analyse_import_custom_words_code": self.__analyse_import_custom_words_code,
+            "import_custom_words": self.__import_custom_words,
+            "get_categories": self.__get_categories,
+            "re_rss_history": self.__re_rss_history,
+            "delete_rss_history": self.__delete_rss_history,
+            "share_filtergroup": self.__share_filtergroup,
+            "import_filtergroup": self.__import_filtergroup
         }
 
     def action(self, cmd, data):
@@ -116,9 +153,9 @@ class WebAction:
             return func(data)
 
     @staticmethod
-    def stop_service():
+    def shutdown_server():
         """
-        停止所有服务
+        停止进程
         """
         # 停止定时服务
         stop_scheduler()
@@ -126,14 +163,10 @@ class WebAction:
         stop_monitor()
         # 签退
         logout_user()
-
-    @staticmethod
-    def shutdown_server():
-        """
-        停卡Flask进程
-        """
-        sig = getattr(signal, "SIGKILL", signal.SIGTERM)
-        os.kill(os.getpid(), sig)
+        # 关闭虚拟显示
+        os.system("ps -ef|grep -w 'Xvfb'|grep -v grep|awk '{print $1}'|xargs kill -9")
+        # 杀进程
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
 
     @staticmethod
     def handle_message_job(msg, in_from=SearchType.OT, user_id=None):
@@ -143,24 +176,30 @@ class WebAction:
         if not msg:
             return
         commands = {
-            "/ptr": {"func": Downloader().pt_removetorrents, "desp": "删种"},
-            "/ptt": {"func": Downloader().pt_transfer, "desp": "下载文件转移"},
+            "/ptr": {"func": Downloader().remove_torrents, "desp": "删种"},
+            "/ptt": {"func": Downloader().transfer, "desp": "下载文件转移"},
             "/pts": {"func": Sites().signin, "desp": "站点签到"},
-            "/rst": {"func": Sync().transfer_all_sync, "desp": "监控目录全量同步"},
+            "/rst": {"func": Sync().transfer_all_sync, "desp": "目录同步"},
             "/rss": {"func": Rss().rssdownload, "desp": "RSS订阅"},
-            "/db": {"func": DouBan().sync, "desp": "豆瓣同步"}
+            "/db": {"func": DoubanSync().sync, "desp": "豆瓣同步"}
         }
         command = commands.get(msg)
         if command:
             # 检查用户权限
             if in_from == SearchType.TG and user_id:
                 if str(user_id) != Telegram().get_admin_user():
-                    Message().send_channel_msg(channel=in_from, title="错误：只有管理员才有权限执行此命令")
+                    Message().send_channel_msg(channel=in_from, title="只有管理员才有权限执行此命令", user_id=user_id)
                     return
             # 启动服务
             ThreadHelper().start_thread(command.get("func"), ())
-            Message().send_channel_msg(channel=in_from, title="%s 已启动" % command.get("desp"))
+            Message().send_channel_msg(channel=in_from, title="正在运行 %s ..." % command.get("desp"))
         else:
+            # 检查用户权限
+            if in_from == SearchType.TG and user_id:
+                if not str(user_id) in Telegram().get_users() \
+                        and str(user_id) != Telegram().get_admin_user():
+                    Message().send_channel_msg(channel=in_from, title="你不在用户白名单中，无法使用此机器人", user_id=user_id)
+                    return
             # 站点检索或者添加订阅
             ThreadHelper().start_thread(search_media_by_message, (msg, in_from, user_id,))
 
@@ -278,12 +317,13 @@ class WebAction:
         启动定时服务
         """
         commands = {
-            "autoremovetorrents": Downloader().pt_removetorrents,
-            "pttransfer": Downloader().pt_transfer,
+            "autoremovetorrents": Downloader().remove_torrents,
+            "pttransfer": Downloader().transfer,
             "ptsignin": Sites().signin,
             "sync": Sync().transfer_all_sync,
             "rssdownload": Rss().rssdownload,
-            "douban": DouBan().sync
+            "douban": DoubanSync().sync,
+            "rsssearch_all": Rss().rsssearch_all,
         }
         sch_item = data.get("item")
         if sch_item and commands.get(sch_item):
@@ -324,37 +364,56 @@ class WebAction:
         dl_dir = data.get("dir")
         results = SqlHelper.get_search_result_by_id(dl_id)
         for res in results:
-            if res[11] and str(res[11]) != "0":
-                msg_item = MetaInfo("%s" % res[8])
-                if res[7] == "TV":
-                    mtype = MediaType.TV
-                elif res[7] == "MOV":
-                    mtype = MediaType.MOVIE
-                else:
-                    mtype = MediaType.ANIME
-                msg_item.type = mtype
-                msg_item.tmdb_id = res[11]
-                msg_item.title = res[1]
-                msg_item.vote_average = res[5]
-                msg_item.poster_path = res[6]
-                msg_item.poster_path = res[12]
-                msg_item.overview = res[13]
-            else:
-                msg_item = Media().get_media_info(title=res[8], subtitle=res[9])
-            msg_item.enclosure = res[0]
-            msg_item.description = res[9]
-            msg_item.size = res[10]
-            msg_item.site = res[14]
-            msg_item.upload_volume_factor = float(res[15])
-            msg_item.download_volume_factor = float(res[16])
+            media = Media().get_media_info(title=res[8], subtitle=res[9])
+            if not media:
+                continue
+            media.set_torrent_info(enclosure=res[0],
+                                   size=res[10],
+                                   site=res[14],
+                                   page_url=res[17],
+                                   upload_volume_factor=float(res[15]),
+                                   download_volume_factor=float(res[16]))
             # 添加下载
-            ret, ret_msg = Downloader().add_pt_torrent(url=res[0], mtype=msg_item.type, download_dir=dl_dir)
+            ret, ret_msg = Downloader().download(media_info=media,
+                                                 download_dir=dl_dir)
             if ret:
                 # 发送消息
-                Message().send_download_message(SearchType.WEB, msg_item)
+                Message().send_download_message(SearchType.WEB, media)
             else:
                 return {"retcode": -1, "retmsg": ret_msg}
         return {"retcode": 0, "retmsg": ""}
+
+    @staticmethod
+    def __download_link(data):
+        site = data.get("site")
+        enclosure = data.get("enclosure")
+        title = data.get("title")
+        description = data.get("description")
+        page_url = data.get("page_url")
+        size = data.get("size")
+        seeders = data.get("seeders")
+        uploadvolumefactor = data.get("uploadvolumefactor")
+        downloadvolumefactor = data.get("downloadvolumefactor")
+        dl_dir = data.get("dl_dir")
+        if not title or not enclosure:
+            return {"code": -1, "msg": "种子信息有误"}
+        media = Media().get_media_info(title=title, subtitle=description)
+        media.site = site
+        media.enclosure = enclosure
+        media.page_url = page_url
+        media.size = size
+        media.upload_volume_factor = float(uploadvolumefactor)
+        media.download_volume_factor = float(downloadvolumefactor)
+        media.seeders = seeders
+        # 添加下载
+        ret, ret_msg = Downloader().download(media_info=media,
+                                             download_dir=dl_dir)
+        if ret:
+            # 发送消息
+            Message().send_download_message(SearchType.WEB, media)
+            return {"code": 0, "msg": "下载成功"}
+        else:
+            return {"code": 1, "msg": ret_msg or "如连接正常，请检查下载任务是否存在"}
 
     @staticmethod
     def __pt_start(data):
@@ -474,6 +533,7 @@ class WebAction:
         手工转移
         """
         path = dest_dir = None
+        syncmod = RMT_MODES.get(data.get("syncmod"))
         logid = data.get("logid")
         if logid:
             paths = SqlHelper.get_transfer_path_by_id(logid)
@@ -521,6 +581,7 @@ class WebAction:
         # 开始转移
         succ_flag, ret_msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
                                                            in_path=path,
+                                                           rmt_mode=syncmod,
                                                            target_dir=dest_dir,
                                                            tmdb_info=tmdb_info,
                                                            media_type=media_type,
@@ -541,6 +602,7 @@ class WebAction:
         """
         inpath = data.get("inpath")
         outpath = data.get("outpath")
+        syncmod = RMT_MODES.get(data.get("syncmod"))
         if not os.path.exists(inpath):
             return {"retcode": -1, "retmsg": "输入路径不存在"}
         tmdbid = data.get("tmdb")
@@ -566,6 +628,7 @@ class WebAction:
         # 自定义转移
         succ_flag, ret_msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
                                                            in_path=inpath,
+                                                           rmt_mode=syncmod,
                                                            target_dir=outpath,
                                                            tmdb_info=tmdb_info,
                                                            media_type=media_type,
@@ -585,54 +648,59 @@ class WebAction:
         """
         删除识别记录及文件
         """
-        logid = data.get('logid')
-        paths = SqlHelper.get_transfer_path_by_id(logid)
-        if paths:
-            dest_dir = paths[0][2]
-            meta_info = MetaInfo(title=paths[0][1])
-            meta_info.title = paths[0][3]
-            meta_info.category = paths[0][4]
-            meta_info.year = paths[0][5]
-            if paths[0][6]:
-                meta_info.begin_season = int(str(paths[0][6]).replace("S", ""))
-            if paths[0][7] == MediaType.MOVIE.value:
-                meta_info.type = MediaType.MOVIE
-            else:
-                meta_info.type = MediaType.TV
-            dest_path = FileTransfer().get_dest_path_by_info(dest=dest_dir, meta_info=meta_info)
-            if dest_path and dest_path.find(meta_info.title) != -1:
-                SqlHelper.delete_transfer_log_by_id(logid)
-                rm_parent_dir = False
-                if not meta_info.get_season_list():
-                    # 电影，删除整个目录
-                    try:
-                        shutil.rmtree(dest_path)
-                    except Exception as e:
-                        log.console(str(e))
-                elif not meta_info.get_episode_string():
-                    # 电视剧但没有集数，删除季目录
-                    try:
-                        shutil.rmtree(dest_path)
-                    except Exception as e:
-                        log.console(str(e))
-                    rm_parent_dir = True
+        logids = data.get('logids')
+        for logid in logids:
+            # 读取历史记录
+            paths = SqlHelper.get_transfer_path_by_id(logid)
+            if paths:
+                dest_dir = paths[0][2]
+                meta_info = MetaInfo(title=paths[0][1])
+                meta_info.title = paths[0][3]
+                meta_info.category = paths[0][4]
+                meta_info.year = paths[0][5]
+                if paths[0][6]:
+                    meta_info.begin_season = int(str(paths[0][6]).replace("S", ""))
+                if paths[0][7] == MediaType.MOVIE.value:
+                    meta_info.type = MediaType.MOVIE
                 else:
-                    # 有集数的电视剧，删除对应的集数文件
-                    for dest_file in PathUtils.get_dir_files(dest_path):
-                        file_meta_info = MetaInfo(os.path.basename(dest_file))
-                        if file_meta_info.get_episode_list() and set(
-                                file_meta_info.get_episode_list()).issubset(set(meta_info.get_episode_list())):
-                            try:
-                                os.remove(dest_file)
-                            except Exception as e:
-                                log.console(str(e))
-                    rm_parent_dir = True
-                if rm_parent_dir and not PathUtils.get_dir_files(os.path.dirname(dest_path), exts=RMT_MEDIAEXT):
-                    # 没有媒体文件时，删除整个目录
-                    try:
-                        shutil.rmtree(os.path.dirname(dest_path))
-                    except Exception as e:
-                        log.console(str(e))
+                    meta_info.type = MediaType.TV
+                # 删除记录
+                SqlHelper.delete_transfer_log_by_id(logid)
+                # 删除文件
+                dest_path = FileTransfer().get_dest_path_by_info(dest=dest_dir, meta_info=meta_info)
+                if dest_path and dest_path.find(meta_info.title) != -1:
+                    rm_parent_dir = False
+                    if not meta_info.get_season_list():
+                        # 电影，删除整个目录
+                        try:
+                            shutil.rmtree(dest_path)
+                        except Exception as e:
+                            log.console(str(e))
+                    elif not meta_info.get_episode_string():
+                        # 电视剧但没有集数，删除季目录
+                        try:
+                            shutil.rmtree(dest_path)
+                        except Exception as e:
+                            log.console(str(e))
+                        rm_parent_dir = True
+                    else:
+                        # 有集数的电视剧，删除对应的集数文件
+                        for dest_file in PathUtils.get_dir_files(dest_path):
+                            file_meta_info = MetaInfo(os.path.basename(dest_file))
+                            if file_meta_info.get_episode_list() and set(
+                                    file_meta_info.get_episode_list()).issubset(set(meta_info.get_episode_list())):
+                                try:
+                                    os.remove(dest_file)
+                                except Exception as e:
+                                    log.console(str(e))
+                        rm_parent_dir = True
+                    if rm_parent_dir \
+                            and not PathUtils.get_dir_files(os.path.dirname(dest_path), exts=RMT_MEDIAEXT):
+                        # 没有媒体文件时，删除整个目录
+                        try:
+                            shutil.rmtree(os.path.dirname(dest_path))
+                        except Exception as e:
+                            log.console(str(e))
         return {"retcode": 0}
 
     @staticmethod
@@ -670,6 +738,16 @@ class WebAction:
         """
         维护站点信息
         """
+
+        def __is_site_duplicate(query_name, query_tid):
+            # 检查是否重名
+            _sites = SqlHelper.get_site_by_name(name=query_name)
+            for site in _sites:
+                site_id = site[0]
+                if str(site_id) != str(query_tid):
+                    return True
+            return False
+
         tid = data.get('site_id')
         name = data.get('site_name')
         site_pri = data.get('site_pri')
@@ -678,7 +756,18 @@ class WebAction:
         cookie = data.get('site_cookie')
         note = data.get('site_note')
         rss_uses = data.get('site_include')
+
+        if __is_site_duplicate(name, tid):
+            return {"code": 400, "msg": "站点名称重复"}
+
         if tid:
+            sites = SqlHelper.get_site_by_id(tid)
+            # 站点不存在
+            if not sites:
+                return {"code": 400, "msg": "站点不存在"}
+
+            old_name = sites[0][1]
+
             ret = SqlHelper.update_config_site(tid=tid,
                                                name=name,
                                                site_pri=site_pri,
@@ -687,6 +776,12 @@ class WebAction:
                                                cookie=cookie,
                                                note=note,
                                                rss_uses=rss_uses)
+            if ret and (name != old_name):
+                # 更新历史站点数据信息
+                SqlHelper.update_site_user_statistics_site_name(name, old_name)
+                SqlHelper.update_site_seed_info_site_name(name, old_name)
+                SqlHelper.update_site_statistics_site_name(name, old_name)
+
         else:
             ret = SqlHelper.insert_config_site(name=name,
                                                site_pri=site_pri,
@@ -697,6 +792,7 @@ class WebAction:
                                                rss_uses=rss_uses)
         # 生效站点配置
         Sites().init_config()
+
         return {"code": ret}
 
     @staticmethod
@@ -711,7 +807,7 @@ class WebAction:
         if tid:
             ret = Sites().get_sites(siteid=tid)
             if ret.get("rssurl"):
-                site_attr = SiteConf().get_grapsite_conf(ret.get("rssurl"))
+                site_attr = Sites().get_grapsite_conf(ret.get("rssurl"))
                 if site_attr.get("FREE"):
                     site_free = True
                 if site_attr.get("2XFREE"):
@@ -739,8 +835,6 @@ class WebAction:
         """
         重启
         """
-        # 停止服务
-        self.stop_service()
         # 退出主进程
         self.shutdown_server()
 
@@ -748,11 +842,9 @@ class WebAction:
         """
         更新
         """
-        # 停止服务
-        self.stop_service()
         # 升级
-        if "synology" in os.popen('uname -a').readline():
-            if os.popen('/bin/ps -w -x | grep -v grep | grep -w "nastool update" | wc -l').readline().strip() == '0':
+        if "synology" in SystemUtils.execute('uname -a'):
+            if SystemUtils.execute('/bin/ps -w -x | grep -v grep | grep -w "nastool update" | wc -l') == '0':
                 # 调用群晖套件内置命令升级
                 os.system('nastool update')
                 # 退出主进程
@@ -887,10 +979,10 @@ class WebAction:
         if name:
             name = MetaInfo(title=name).get_name()
         if mtype:
-            if mtype in ['nm', 'hm', 'dbom', 'dbhm', 'dbnm', 'MOV']:
+            if mtype in ['nm', 'hm', 'dbom', 'dbhm', 'dbnm', 'dbtop', 'MOV', '电影']:
                 SqlHelper.delete_rss_movie(title=name, year=year, rssid=rssid, tmdbid=tmdbid)
             else:
-                SqlHelper.delete_rss_tv(title=name, year=year, season=season, rssid=rssid, tmdbid=tmdbid)
+                SqlHelper.delete_rss_tv(title=name, season=season, rssid=rssid, tmdbid=tmdbid)
         return {"code": 0, "page": page, "name": name}
 
     @staticmethod
@@ -914,8 +1006,10 @@ class WebAction:
         rss_team = data.get("rss_team")
         rss_rule = data.get("rss_rule")
         rssid = data.get("rssid")
+        total_ep = data.get("total_ep")
+        current_ep = data.get("current_ep")
         if name and mtype:
-            if mtype in ['nm', 'hm', 'dbom', 'dbhm', 'dbnm', 'MOV']:
+            if mtype in ['nm', 'hm', 'dbom', 'dbhm', 'dbnm', 'dbtop', 'MOV', '电影']:
                 mtype = MediaType.MOVIE
             else:
                 mtype = MediaType.TV
@@ -923,64 +1017,96 @@ class WebAction:
             code = 0
             msg = ""
             for sea in season:
-                code, msg, media_info = add_rss_subscribe(mtype=mtype,
-                                                          name=name,
-                                                          year=year,
-                                                          season=sea,
-                                                          match=match,
-                                                          doubanid=doubanid,
-                                                          tmdbid=tmdbid,
-                                                          sites=sites,
-                                                          search_sites=search_sites,
-                                                          over_edition=over_edition,
-                                                          rss_restype=rss_restype,
-                                                          rss_pix=rss_pix,
-                                                          rss_team=rss_team,
-                                                          rss_rule=rss_rule,
-                                                          rssid=rssid)
+                code, msg, media_info = Subscribe.add_rss_subscribe(mtype=mtype,
+                                                                    name=name,
+                                                                    year=year,
+                                                                    season=sea,
+                                                                    match=match,
+                                                                    doubanid=doubanid,
+                                                                    tmdbid=tmdbid,
+                                                                    sites=sites,
+                                                                    search_sites=search_sites,
+                                                                    over_edition=over_edition,
+                                                                    rss_restype=rss_restype,
+                                                                    rss_pix=rss_pix,
+                                                                    rss_team=rss_team,
+                                                                    rss_rule=rss_rule,
+                                                                    rssid=rssid)
                 if code != 0:
                     break
         else:
-            code, msg, media_info = add_rss_subscribe(mtype=mtype,
-                                                      name=name,
-                                                      year=year,
-                                                      season=season,
-                                                      match=match,
-                                                      doubanid=doubanid,
-                                                      tmdbid=tmdbid,
-                                                      sites=sites,
-                                                      search_sites=search_sites,
-                                                      over_edition=over_edition,
-                                                      rss_restype=rss_restype,
-                                                      rss_pix=rss_pix,
-                                                      rss_team=rss_team,
-                                                      rss_rule=rss_rule,
-                                                      rssid=rssid)
-        return {"code": code, "msg": msg, "page": page, "name": name}
+            code, msg, media_info = Subscribe.add_rss_subscribe(mtype=mtype,
+                                                                name=name,
+                                                                year=year,
+                                                                season=season,
+                                                                match=match,
+                                                                doubanid=doubanid,
+                                                                tmdbid=tmdbid,
+                                                                sites=sites,
+                                                                search_sites=search_sites,
+                                                                over_edition=over_edition,
+                                                                rss_restype=rss_restype,
+                                                                rss_pix=rss_pix,
+                                                                rss_team=rss_team,
+                                                                rss_rule=rss_rule,
+                                                                rssid=rssid,
+                                                                total_ep=total_ep,
+                                                                current_ep=current_ep)
+        if not rssid:
+            if mtype == MediaType.MOVIE:
+                rssid = SqlHelper.get_rss_movie_id(title=name, tmdbid=tmdbid or "DB:%s" % doubanid)
+            else:
+                rssid = SqlHelper.get_rss_tv_id(title=name, tmdbid=tmdbid or "DB:%s" % doubanid)
+        return {"code": code, "msg": msg, "page": page, "name": name, "rssid": rssid}
 
     @staticmethod
     def __re_identification(data):
         """
         未识别的重新识别
         """
-        path = dest_dir = None
-        unknown_id = data.get("unknown_id")
-        if unknown_id:
-            paths = SqlHelper.get_unknown_path_by_id(unknown_id)
-            if paths:
-                path = paths[0][0]
-                dest_dir = paths[0][1]
-            else:
-                return {"retcode": -1, "retmsg": "未查询到未识别记录"}
-        if not dest_dir:
-            dest_dir = ""
-        if not path:
-            return {"retcode": -1, "retmsg": "未识别路径有误"}
-        succ_flag, ret_msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
-                                                           in_path=path,
-                                                           target_dir=dest_dir)
-        if succ_flag:
-            SqlHelper.update_transfer_unknown_state(path)
+        flag = data.get("flag")
+        ids = data.get("ids")
+        ret_flag = True
+        ret_msg = ""
+        if flag == "unknow":
+            for wid in ids:
+                paths = SqlHelper.get_unknown_path_by_id(wid)
+                if paths:
+                    path = paths[0][0]
+                    dest_dir = paths[0][1]
+                else:
+                    return {"retcode": -1, "retmsg": "未查询到未识别记录"}
+                if not dest_dir:
+                    dest_dir = ""
+                if not path:
+                    return {"retcode": -1, "retmsg": "未识别路径有误"}
+                succ_flag, msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
+                                                               in_path=path,
+                                                               target_dir=dest_dir)
+                if succ_flag:
+                    SqlHelper.update_transfer_unknown_state(path)
+                else:
+                    ret_flag = False
+                    ret_msg = "%s\n%s" % (ret_msg, msg)
+        elif flag == "history":
+            for wid in ids:
+                paths = SqlHelper.get_transfer_path_by_id(wid)
+                if paths:
+                    path = os.path.join(paths[0][0], paths[0][1])
+                    dest_dir = paths[0][2]
+                else:
+                    return {"retcode": -1, "retmsg": "未查询到转移日志记录"}
+                if not dest_dir:
+                    dest_dir = ""
+                if not path:
+                    return {"retcode": -1, "retmsg": "未识别路径有误"}
+                succ_flag, msg = FileTransfer().transfer_media(in_from=SyncType.MAN,
+                                                               in_path=path,
+                                                               target_dir=dest_dir)
+                if not succ_flag:
+                    ret_flag = False
+                    ret_msg = "%s\n%s" % (ret_msg, msg)
+        if ret_flag:
             return {"retcode": 0, "retmsg": "转移成功"}
         else:
             return {"retcode": 2, "retmsg": ret_msg}
@@ -997,7 +1123,7 @@ class WebAction:
         page = data.get("page")
         doubanid = data.get("doubanid")
         rssid = data.get("rssid")
-        if mtype in ['hm', 'nm', 'dbom', 'dbhm', 'dbnm', 'MOV']:
+        if mtype in ['hm', 'nm', 'dbom', 'dbhm', 'dbnm', 'dbtop', 'MOV', '电影']:
             media_type = MediaType.MOVIE
         else:
             media_type = MediaType.TV
@@ -1031,7 +1157,7 @@ class WebAction:
 
             # 查订阅信息
             if not rssid:
-                rssid = SqlHelper.get_rss_movie_id(title=title, year=year, tmdbid=tmdbid or "DB:%s" % doubanid)
+                rssid = SqlHelper.get_rss_movie_id(title=title, tmdbid=tmdbid or "DB:%s" % doubanid)
 
             # 查下载信息
 
@@ -1079,11 +1205,13 @@ class WebAction:
                 vote_average = round(float(tmdb_info.get("vote_average")), 1)
                 release_date = tmdb_info.get('first_air_date')
                 year = release_date[0:4] if release_date else ""
-                seasons = [{"text": "第%s季" % cn2an.an2cn(season.get("season_number"), mode='low'), "num": season.get("season_number")} for season in Media().get_tmdb_seasons_list(tv_info=tmdb_info)]
+                seasons = [{"text": "第%s季" % cn2an.an2cn(season.get("season_number"), mode='low'),
+                            "num": season.get("season_number")} for season in
+                           Media().get_tmdb_seasons_list(tv_info=tmdb_info)]
 
             # 查订阅信息
             if not rssid:
-                rssid = SqlHelper.get_rss_tv_id(title=title, year=year, tmdbid=tmdbid or "DB:%s" % doubanid)
+                rssid = SqlHelper.get_rss_tv_id(title=title, tmdbid=tmdbid or "DB:%s" % doubanid)
 
             return {
                 "code": 0,
@@ -1217,7 +1345,9 @@ class WebAction:
             title = douban_info.get("title")
             rating = douban_info.get("rating", {}) or {}
             vote_average = rating.get("value") or "无"
-            release_date = re.sub(r"\(.*\)", "", douban_info.get("pubdate")[0])
+            release_date = douban_info.get("pubdate")
+            if release_date:
+                release_date = re.sub(r"\(.*\)", "", douban_info.get("pubdate")[0])
             if not release_date:
                 return {"code": 1, "retmsg": "上映日期不正确"}
             else:
@@ -1315,33 +1445,37 @@ class WebAction:
     def __rss_detail(data):
         rssid = data.get("rssid")
         rsstype = data.get("rsstype")
-        if rsstype == "MOV":
+        if rsstype in ['nm', 'hm', 'dbom', 'dbhm', 'dbnm', 'dbtop', 'MOV', '电影']:
             rss = SqlHelper.get_rss_movies(rssid=rssid)
             if not rss:
                 return {"code": 1}
-            r_sites, s_sites, over_edition, filter_map = Torrent.get_rss_note_item(rss[0][4])
+            rss_info = Torrent.get_rss_note_item(rss[0][4])
             rssdetail = {"rssid": rssid,
                          "name": rss[0][0],
                          "year": rss[0][1],
                          "tmdbid": rss[0][2],
-                         "r_sites": r_sites,
-                         "s_sites": s_sites,
-                         "over_edition": over_edition,
-                         "filter": filter_map}
+                         "r_sites": rss_info.get("rss_sites"),
+                         "s_sites": rss_info.get("search_sites"),
+                         "over_edition": rss_info.get("over_edition"),
+                         "filter": rss_info.get("filter_map"),
+                         "type": "MOV"}
         else:
             rss = SqlHelper.get_rss_tvs(rssid=rssid)
             if not rss:
                 return {"code": 1}
-            r_sites, s_sites, over_edition, filter_map = Torrent.get_rss_note_item(rss[0][5])
+            rss_info = Torrent.get_rss_note_item(rss[0][5])
             rssdetail = {"rssid": rssid,
                          "name": rss[0][0],
                          "year": rss[0][1],
                          "season": rss[0][2],
                          "tmdbid": rss[0][3],
-                         "r_sites": r_sites,
-                         "s_sites": s_sites,
-                         "over_edition": over_edition,
-                         "filter": filter_map}
+                         "r_sites": rss_info.get("rss_sites"),
+                         "s_sites": rss_info.get("search_sites"),
+                         "over_edition": rss_info.get("over_edition"),
+                         "filter": rss_info.get("filter_map"),
+                         "total_ep": rss_info.get("episode_info", {}).get("total"),
+                         "current_ep": rss_info.get("episode_info", {}).get("current"),
+                         "type": "TV"}
 
         return {"code": 0, "detail": rssdetail}
 
@@ -1360,6 +1494,15 @@ class WebAction:
         清空文件转移黑名单记录
         """
         SqlHelper.truncate_transfer_blacklist()
+        return {"code": 0}
+
+    @staticmethod
+    def __truncate_rsshistory(data):
+        """
+        清空RSS历史记录
+        """
+        SqlHelper.truncate_rss_history()
+        SqlHelper.truncate_rss_episodes()
         return {"code": 0}
 
     @staticmethod
@@ -1390,6 +1533,9 @@ class WebAction:
         brushtask_seedsize = data.get("brushtask_seedsize")
         brushtask_dltime = data.get("brushtask_dltime")
         brushtask_avg_upspeed = data.get("brushtask_avg_upspeed")
+        brushtask_pubdate = data.get("brushtask_pubdate")
+        brushtask_upspeed = data.get("brushtask_upspeed")
+        brushtask_downspeed = data.get("brushtask_downspeed")
         # 选种规则
         rss_rule = {
             "free": brushtask_free,
@@ -1399,6 +1545,9 @@ class WebAction:
             "exclude": brushtask_exclude,
             "dlcount": brushtask_dlcount,
             "peercount": brushtask_peercount,
+            "pubdate": brushtask_pubdate,
+            "upspeed": brushtask_upspeed,
+            "downspeed": brushtask_downspeed
         }
         # 删除规则
         remove_rule = {
@@ -1531,8 +1680,7 @@ class WebAction:
         else:
             return {"code": 1}
 
-    @staticmethod
-    def __name_test(data):
+    def __name_test(self, data):
         """
         名称识别测试
         """
@@ -1542,21 +1690,45 @@ class WebAction:
         media_info = Media().get_media_info(title=name)
         if not media_info:
             return {"code": 0, "data": {"name": "无法识别"}}
-        return {"code": 0, "data": {
+        return {"code": 0, "data": self.mediainfo_dict(media_info)}
+
+    @staticmethod
+    def mediainfo_dict(media_info):
+        if not media_info:
+            return {}
+        tmdb_id = media_info.tmdb_id
+        tmdb_link = ""
+        tmdb_S_E_link = ""
+        if tmdb_id:
+            if media_info.type == MediaType.MOVIE:
+                tmdb_link = "https://www.themoviedb.org/movie/" + str(tmdb_id)
+            else:
+                tmdb_link = "https://www.themoviedb.org/tv/" + str(tmdb_id)
+                if media_info.get_season_string():
+                    tmdb_S_E_link = "%s/season/%s" % (tmdb_link, media_info.get_season_seq())
+                    if media_info.get_episode_string():
+                        tmdb_S_E_link = "%s/episode/%s" % (tmdb_S_E_link, media_info.get_episode_seq())
+        return {
             "type": media_info.type.value if media_info.type else "",
             "name": media_info.get_name(),
             "title": media_info.title,
             "year": media_info.year,
             "season_episode": media_info.get_season_episode_string(),
             "part": media_info.part,
-            "tmdbid": media_info.tmdb_id,
+            "tmdbid": tmdb_id,
+            "tmdblink": tmdb_link,
+            "tmdb_S_E_link": tmdb_S_E_link,
             "category": media_info.category,
             "restype": media_info.resource_type,
             "pix": media_info.resource_pix,
             "team": media_info.resource_team,
             "video_codec": media_info.video_encode,
-            "audio_codec": media_info.audio_encode
-        }}
+            "audio_codec": media_info.audio_encode,
+            "org_string": media_info.org_string,
+            "ignored_words": media_info.ignored_words,
+            "replaced_words": media_info.replaced_words,
+            "offset_words": media_info.offset_words
+        }
 
     @staticmethod
     def __rule_test(data):
@@ -1587,7 +1759,8 @@ class WebAction:
         start_time = datetime.datetime.now()
         if target.find("themoviedb") != -1 \
                 or target.find("telegram") != -1 \
-                or target.find("fanart") != -1:
+                or target.find("fanart") != -1 \
+                or target.find("tmdb") != -1:
             res = RequestUtils(proxies=Config().get_proxies(), timeout=5).get_res(target)
         else:
             res = RequestUtils(timeout=5).get_res(target)
@@ -1610,7 +1783,8 @@ class WebAction:
             return {"code": 1, "msg": "查询参数错误"}
 
         resp = {"code": 0}
-        resp.update(Sites().get_pt_site_activity_history(data["name"]))
+
+        resp.update({"dataset": Sites().get_pt_site_activity_history(data["name"])})
         return resp
 
     @staticmethod
@@ -1625,7 +1799,11 @@ class WebAction:
 
         resp = {"code": 0}
         _, _, site, upload, download = Sites().get_pt_site_statistics_history(data["days"] + 1)
-        resp.update({"site": site, "upload": upload, "download": download})
+
+        # 调整为dataset组织数据
+        dataset = [["site", "upload", "download"]]
+        dataset.extend([[site, upload, download] for site, upload, download in zip(site, upload, download)])
+        resp.update({"dataset": dataset})
         return resp
 
     @staticmethod
@@ -1639,7 +1817,13 @@ class WebAction:
             return {"code": 1, "msg": "查询参数错误"}
 
         resp = {"code": 0}
-        resp.update(Sites().get_pt_site_seeding_info(data["name"]))
+
+        seeding_info = Sites().get_pt_site_seeding_info(data["name"]).get("seeding_info", [])
+        # 调整为dataset组织数据
+        dataset = [["seeders", "size"]]
+        dataset.extend(seeding_info)
+
+        resp.update({"dataset": dataset})
         return resp
 
     @staticmethod
@@ -1652,6 +1836,25 @@ class WebAction:
         if not name:
             return {"code": -1}
         SqlHelper.add_filter_group(name, default)
+        FilterRule().init_config()
+        return {"code": 0}
+
+    @staticmethod
+    def __restore_filtergroup(data):
+        """
+        恢复初始规则组
+        """
+        groupids = data.get("groupids")
+        init_rulegroups = data.get("init_rulegroups")
+        for groupid in groupids:
+            try:
+                SqlHelper.delete_filtergroup(groupid)
+            except Exception as err:
+                print(err)
+            for init_rulegroup in init_rulegroups:
+                if str(init_rulegroup.get("id")) == groupid:
+                    for sql in init_rulegroup.get("sql"):
+                        SqlHelper.excute(sql)
         FilterRule().init_config()
         return {"code": 0}
 
@@ -1683,7 +1886,7 @@ class WebAction:
             "size": data.get("rule_sizelimit"),
             "free": data.get("rule_free")
         }
-        SqlHelper.insert_filter_rule(rule_id, item)
+        SqlHelper.insert_filter_rule(ruleid=rule_id, item=item)
         FilterRule().init_config()
         return {"code": 0}
 
@@ -1726,22 +1929,25 @@ class WebAction:
             res_list = Media().get_tmdb_new_tvs(CurrentPage)
         elif RecommendType == "dbom":
             # 豆瓣正在上映
-            res_list = DoubanHot().get_douban_online_movie(CurrentPage)
+            res_list = DouBan().get_douban_online_movie(CurrentPage)
         elif RecommendType == "dbhm":
             # 豆瓣热门电影
-            res_list = DoubanHot().get_douban_hot_movie(CurrentPage)
+            res_list = DouBan().get_douban_hot_movie(CurrentPage)
         elif RecommendType == "dbht":
             # 豆瓣热门电视剧
-            res_list = DoubanHot().get_douban_hot_tv(CurrentPage)
+            res_list = DouBan().get_douban_hot_tv(CurrentPage)
         elif RecommendType == "dbdh":
             # 豆瓣热门动画
-            res_list = DoubanHot().get_douban_hot_anime(CurrentPage)
+            res_list = DouBan().get_douban_hot_anime(CurrentPage)
         elif RecommendType == "dbnm":
             # 豆瓣最新电影
-            res_list = DoubanHot().get_douban_new_movie(CurrentPage)
+            res_list = DouBan().get_douban_new_movie(CurrentPage)
+        elif RecommendType == "dbtop":
+            # 豆瓣TOP250电影
+            res_list = DouBan().get_douban_top250_movie(CurrentPage)
         elif RecommendType == "dbzy":
             # 豆瓣最新电视剧
-            res_list = DoubanHot().get_douban_hot_show(CurrentPage)
+            res_list = DouBan().get_douban_hot_show(CurrentPage)
         else:
             res_list = []
 
@@ -1749,7 +1955,7 @@ class WebAction:
         for res in res_list:
             rid = res.get('id')
             orgid = rid
-            if RecommendType in ['hm', 'nm', 'dbom', 'dbhm', 'dbnm']:
+            if RecommendType in ['hm', 'nm', 'dbom', 'dbhm', 'dbnm', 'dbtop']:
                 title = res.get('title')
                 date = res.get('release_date')
                 if date:
@@ -1759,7 +1965,7 @@ class WebAction:
                 name = MetaInfo(title).get_name()
                 if RecommendType not in ['hm', 'nm']:
                     rid = "DB:%s" % rid
-                rssid = SqlHelper.get_rss_movie_id(title=title, year=year, tmdbid=rid)
+                rssid = SqlHelper.get_rss_movie_id(title=name, tmdbid=rid)
                 if rssid:
                     # 已订阅
                     fav = 1
@@ -1779,11 +1985,11 @@ class WebAction:
                 name = MetaInfo(title).get_name()
                 if RecommendType not in ['ht', 'nt']:
                     rid = "DB:%s" % rid
-                rssid = SqlHelper.get_rss_tv_id(title=title, year=year, tmdbid=rid)
+                rssid = SqlHelper.get_rss_tv_id(title=name, tmdbid=rid)
                 if rssid:
                     # 已订阅
                     fav = 1
-                elif MediaServer().check_item_exists(title=name, year=year, tmdbid=rid):
+                elif MediaServer().check_item_exists(title=name, tmdbid=rid):
                     # 已下载
                     fav = 2
                 else:
@@ -1820,11 +2026,11 @@ class WebAction:
     def parse_sites_string(notes):
         if not notes:
             return ""
-        rss_sites, search_sites, _, _ = Torrent.get_rss_note_item(notes)
+        rss_info = Torrent.get_rss_note_item(notes)
         rss_site_htmls = ['<span class="badge bg-lime me-1 mb-1" title="订阅站点">%s</span>' % s for s in
-                          rss_sites if s]
+                          rss_info.get("rss_sites") if s]
         search_site_htmls = ['<span class="badge bg-yellow me-1 mb-1" title="搜索站点">%s</span>' % s for s in
-                             search_sites if s]
+                             rss_info.get("search_sites") if s]
 
         return "".join(rss_site_htmls) + "".join(search_site_htmls)
 
@@ -1832,37 +2038,56 @@ class WebAction:
     def parse_filter_string(notes):
         if not notes:
             return ""
-        _, _, over_edition, filter_map = Torrent.get_rss_note_item(notes)
+        rss_info = Torrent.get_rss_note_item(notes)
         filter_htmls = []
-        if over_edition:
+        if rss_info.get("over_edition"):
             filter_htmls.append('<span class="badge badge-outline text-red me-1 mb-1" title="已开启洗版">洗版</span>')
-        if filter_map.get("restype"):
+        if rss_info.get("filter_map") and rss_info.get("filter_map").get("restype"):
             filter_htmls.append(
-                '<span class="badge badge-outline text-orange me-1 mb-1">%s</span>' % filter_map.get("restype"))
-        if filter_map.get("pix"):
+                '<span class="badge badge-outline text-orange me-1 mb-1">%s</span>' % rss_info.get("filter_map").get(
+                    "restype"))
+        if rss_info.get("filter_map") and rss_info.get("filter_map").get("pix"):
             filter_htmls.append(
-                '<span class="badge badge-outline text-orange me-1 mb-1">%s</span>' % filter_map.get("pix"))
-        if filter_map.get("team"):
+                '<span class="badge badge-outline text-orange me-1 mb-1">%s</span>' % rss_info.get("filter_map").get(
+                    "pix"))
+        if rss_info.get("filter_map") and rss_info.get("filter_map").get("team"):
             filter_htmls.append(
-                '<span class="badge badge-outline text-blue me-1 mb-1">%s</span>' % filter_map.get("team"))
-        if filter_map.get("rule"):
+                '<span class="badge badge-outline text-blue me-1 mb-1">%s</span>' % rss_info.get("filter_map").get(
+                    "team"))
+        if rss_info.get("filter_map") and rss_info.get("filter_map").get("rule"):
             filter_htmls.append('<span class="badge badge-outline text-orange me-1 mb-1">%s</span>' %
-                                FilterRule().get_rule_groups(groupid=filter_map.get("rule")).get("name") or "")
+                                FilterRule().get_rule_groups(groupid=rss_info.get("filter_map").get("rule")).get(
+                                    "name") or "")
         return "".join(filter_htmls)
 
     @staticmethod
     def parse_brush_rule_string(rules: dict):
         if not rules:
             return ""
-        rule_filter_string = {"gt": "大于", "lt": "小于", "bw": "介于"}
+        rule_filter_string = {"gt": ">", "lt": "<", "bw": ""}
         rule_htmls = []
         if rules.get("size"):
             sizes = rules.get("size").split("#")
             if sizes[0]:
                 if sizes[1]:
                     sizes[1] = sizes[1].replace(",", "-")
-                rule_htmls.append('<span class="badge badge-outline text-blue me-1 mb-1" title="种子大小">%s: %s GB</span>'
-                                  % (rule_filter_string.get(sizes[0]), sizes[1]))
+                rule_htmls.append(
+                    '<span class="badge badge-outline text-blue me-1 mb-1" title="种子大小">种子大小: %s %sGB</span>'
+                    % (rule_filter_string.get(sizes[0]), sizes[1]))
+        if rules.get("pubdate"):
+            pubdates = rules.get("pubdate").split("#")
+            if pubdates[0]:
+                if pubdates[1]:
+                    pubdates[1] = pubdates[1].replace(",", "-")
+                rule_htmls.append(
+                    '<span class="badge badge-outline text-blue me-1 mb-1" title="发布时间">发布时间: %s %s小时</span>'
+                    % (rule_filter_string.get(pubdates[0]), pubdates[1]))
+        if rules.get("upspeed"):
+            rule_htmls.append('<span class="badge badge-outline text-blue me-1 mb-1" title="上传限速">上传限速: %sB/s</span>'
+                              % StringUtils.str_filesize(int(rules.get("upspeed")) * 1024))
+        if rules.get("downspeed"):
+            rule_htmls.append('<span class="badge badge-outline text-blue me-1 mb-1" title="下载限速">下载限速: %sB/s</span>'
+                              % StringUtils.str_filesize(int(rules.get("downspeed")) * 1024))
         if rules.get("include"):
             rule_htmls.append('<span class="badge badge-outline text-green me-1 mb-1" title="包含规则">包含: %s</span>'
                               % rules.get("include"))
@@ -1872,7 +2097,7 @@ class WebAction:
             rule_htmls.append('<span class="badge badge-outline text-red me-1 mb-1" title="排除规则">排除: %s</span>'
                               % rules.get("exclude"))
         if rules.get("dlcount"):
-            rule_htmls.append('<span class="badge badge-outline text-orange me-1 mb-1" title="同时下载数量限制">同时下载: %s</span>'
+            rule_htmls.append('<span class="badge badge-outline text-blue me-1 mb-1" title="同时下载数量限制">同时下载: %s</span>'
                               % rules.get("dlcount"))
         if rules.get("peercount"):
             peer_counts = None
@@ -1891,39 +2116,44 @@ class WebAction:
                     pass
             if peer_counts:
                 rule_htmls.append(
-                    '<span class="badge badge-outline text-orange me-1 mb-1" title="当前做种人数限制">做种人数%s: %s</span>'
+                    '<span class="badge badge-outline text-blue me-1 mb-1" title="当前做种人数限制">做种人数: %s %s</span>'
                     % (rule_filter_string.get(peer_counts[0]), peer_counts[1]))
         if rules.get("time"):
             times = rules.get("time").split("#")
             if times[0]:
                 rule_htmls.append(
-                    '<span class="badge badge-outline text-orange me-1 mb-1" title="做种时间">做种%s: %s 小时</span>'
+                    '<span class="badge badge-outline text-orange me-1 mb-1" title="做种时间">做种时间: %s %s小时</span>'
                     % (rule_filter_string.get(times[0]), times[1]))
         if rules.get("ratio"):
             ratios = rules.get("ratio").split("#")
             if ratios[0]:
-                rule_htmls.append('<span class="badge badge-outline text-orange me-1 mb-1" title="分享率">分享率%s: %s</span>'
-                                  % (rule_filter_string.get(ratios[0]), ratios[1]))
+                rule_htmls.append(
+                    '<span class="badge badge-outline text-orange me-1 mb-1" title="分享率">分享率: %s %s</span>'
+                    % (rule_filter_string.get(ratios[0]), ratios[1]))
         if rules.get("uploadsize"):
             uploadsizes = rules.get("uploadsize").split("#")
             if uploadsizes[0]:
                 rule_htmls.append(
-                    '<span class="badge badge-outline text-orange me-1 mb-1" title="上传量">上传量%s: %s GB</span>'
+                    '<span class="badge badge-outline text-orange me-1 mb-1" title="上传量">上传量: %s %sGB</span>'
                     % (rule_filter_string.get(uploadsizes[0]), uploadsizes[1]))
         if rules.get("dltime"):
             dltimes = rules.get("dltime").split("#")
             if dltimes[0]:
                 rule_htmls.append(
-                    '<span class="badge badge-outline text-orange me-1 mb-1" title="下载耗时">下载耗时%s: %s 小时</span>'
+                    '<span class="badge badge-outline text-orange me-1 mb-1" title="下载耗时">下载耗时: %s %s小时</span>'
                     % (rule_filter_string.get(dltimes[0]), dltimes[1]))
         if rules.get("avg_upspeed"):
             avg_upspeeds = rules.get("avg_upspeed").split("#")
             if avg_upspeeds[0]:
                 rule_htmls.append(
-                    '<span class="badge badge-outline text-orange me-1 mb-1" title="平均上传速度">平均上传速度%s: %s KB/S</span>'
+                    '<span class="badge badge-outline text-orange me-1 mb-1" title="平均上传速度">平均上传速度: %s %sKB/S</span>'
                     % (rule_filter_string.get(avg_upspeeds[0]), avg_upspeeds[1]))
 
         return "<br>".join(rule_htmls)
+
+    @staticmethod
+    def str_filesize(size):
+        return StringUtils.str_filesize(size, pre=1)
 
     @staticmethod
     def __clear_tmdb_cache(data):
@@ -1942,7 +2172,7 @@ class WebAction:
         """
         检查站点标识
         """
-        site_attr = SiteConf().get_grapsite_conf(data.get("url"))
+        site_attr = Sites().get_grapsite_conf(data.get("url"))
         site_free = site_2xfree = site_hr = False
         if site_attr.get("FREE"):
             site_free = True
@@ -1957,32 +2187,11 @@ class WebAction:
         """
         刷新进度条
         """
-        detail = ProgressController().get_process(data.get("type"))
+        detail = ProgressHelper().get_process(data.get("type"))
         if detail:
             return {"code": 0, "value": detail.get("value"), "text": detail.get("text")}
         else:
             return {"code": 1, "value": 0, "text": "正在处理..."}
-
-    @staticmethod
-    def get_download_dirs(data=None):
-        """
-        获取下载目录列表
-        """
-        dl_dirs = []
-        # 设置的下载器的目录
-        client_type = Config().get_config("pt").get("pt_client")
-        save_path = Config().get_config(client_type).get("save_path")
-        if save_path:
-            if isinstance(save_path, str):
-                dl_dirs.append(os.path.normpath(save_path))
-            else:
-                for path in dict(save_path).values():
-                    if not path:
-                        continue
-                    dl_dirs.append(os.path.normpath(path.split("|")[0]))
-        # 下载器自己设置的目录
-        client_dirs = Downloader().get_download_dirs()
-        return [x.replace("\\", "/") for x in list(set(client_dirs).union(set(dl_dirs)))]
 
     @staticmethod
     def __restory_backup(data):
@@ -2035,3 +2244,593 @@ class WebAction:
             {"text": "第%s季" % cn2an.an2cn(season.get("season_number"), mode='low'), "num": season.get("season_number")}
             for season in Media().get_tmdb_seasons_list(tmdbid=tmdbid)]
         return {"code": 0, "seasons": seasons}
+
+    @staticmethod
+    def __get_userrss_task(data):
+        """
+        获取自定义订阅详情
+        """
+        taskid = data.get("id")
+        return {"code": 0, "detail": RssChecker().get_rsstask_info(taskid=taskid)}
+
+    @staticmethod
+    def __delete_userrss_task(data):
+        """
+        删除自定义订阅
+        """
+        if SqlHelper.delete_userrss_task(data.get("id")):
+            RssChecker().init_config()
+            return {"code": 0}
+        else:
+            return {"code": 1}
+
+    @staticmethod
+    def __update_userrss_task(data):
+        """
+        新增或修改自定义订阅
+        """
+        params = {
+            "id": data.get("id"),
+            "name": data.get("name"),
+            "address": data.get("address"),
+            "parser": data.get("parser"),
+            "interval": data.get("interval"),
+            "uses": data.get("uses"),
+            "include": data.get("include"),
+            "exclude": data.get("exclude"),
+            "filterrule": data.get("filterrule"),
+            "state": data.get("state"),
+            "note": data.get("note")
+        }
+        if SqlHelper.update_userrss_task(params):
+            RssChecker().init_config()
+            return {"code": 0}
+        else:
+            return {"code": 1}
+
+    @staticmethod
+    def __get_rssparser(data):
+        """
+        获取订阅解析器详情
+        """
+        pid = data.get("id")
+        return {"code": 0, "detail": RssChecker().get_userrss_parser(pid=pid)}
+
+    @staticmethod
+    def __delete_rssparser(data):
+        """
+        删除订阅解析器
+        """
+        if SqlHelper.delete_userrss_parser(data.get("id")):
+            return {"code": 0}
+        else:
+            return {"code": 1}
+
+    @staticmethod
+    def __update_rssparser(data):
+        """
+        新增或更新订阅解析器
+        """
+        params = {
+            "id": data.get("id"),
+            "name": data.get("name"),
+            "type": data.get("type"),
+            "format": data.get("format"),
+            "params": data.get("params")
+        }
+        if SqlHelper.update_userrss_parser(params):
+            return {"code": 0}
+        else:
+            return {"code": 1}
+
+    @staticmethod
+    def __run_userrss(data):
+        RssChecker().check_task_rss(data.get("id"))
+        return {"code": 0}
+
+    @staticmethod
+    def __run_brushtask(data):
+        BrushTask().check_task_rss(data.get("id"))
+        return {"code": 0}
+
+    @staticmethod
+    def __list_site_resources(data):
+        resources = BuiltinIndexer().list(data.get("id"), data.get("page"), data.get("keyword"))
+        if not resources:
+            return {"code": 1, "msg": "获取站点资源出现错误，无法连接到站点！"}
+        else:
+            return {"code": 0, "data": resources}
+
+    @staticmethod
+    def __list_rss_articles(data):
+        articles = RssChecker().get_rss_articles(data.get("id"))
+        count = len(articles)
+        if articles:
+            return {"code": 0, "data": articles, "count": count}
+        else:
+            return {"code": 1, "msg": "未获取到报文"}
+
+    def __rss_article_test(self, data):
+        taskid = data.get("taskid")
+        title = data.get("title")
+        if not taskid:
+            return {"code": -1}
+        if not title:
+            return {"code": -1}
+        media_info, match_flag, exist_flag = RssChecker().test_rss_articles(taskid=taskid, title=title)
+        if not media_info:
+            return {"code": 0, "data": {"name": "无法识别"}}
+        media_dict = self.mediainfo_dict(media_info)
+        media_dict.update({"match_flag": match_flag, "exist_flag": exist_flag})
+        return {"code": 0, "data": media_dict}
+
+    @staticmethod
+    def __list_rss_history(data):
+        downloads = []
+        historys = SqlHelper.get_userrss_task_history(data.get("id"))
+        count = len(historys)
+        for history in historys:
+            params = {
+                "title": history[2],
+                "downloader": history[3],
+                "date": history[4]
+            }
+            downloads.append(params)
+        if downloads:
+            return {"code": 0, "data": downloads, "count": count}
+        else:
+            return {"code": 1, "msg": "无下载记录"}
+
+    @staticmethod
+    def __rss_articles_check(data):
+        if not data.get("articles"):
+            return {"code": 2}
+        res = RssChecker().check_rss_articles(flag=data.get("flag"), articles=data.get("articles"))
+        if res:
+            return {"code": 0}
+        else:
+            return {"code": 1}
+
+    @staticmethod
+    def __rss_articles_download(data):
+        if not data.get("articles"):
+            return {"code": 2}
+        res = RssChecker().download_rss_articles(taskid=data.get("taskid"), articles=data.get("articles"))
+        if res:
+            return {"code": 0}
+        else:
+            return {"code": 1}
+
+    @staticmethod
+    def __add_custom_word_group(data):
+        try:
+            tmdb_id = data.get("tmdb_id")
+            tmdb_type = data.get("tmdb_type")
+            if tmdb_type == "tv":
+                if not SqlHelper.is_custom_word_group_existed(tmdbid=tmdb_id, wtype=2):
+                    tmdb_info = Media().get_tmdb_info(mtype=MediaType.TV, tmdbid=tmdb_id)
+                    if not tmdb_info:
+                        return {"code": 1, "msg": "添加失败，无法查询到TMDB信息"}
+                    SqlHelper.insert_custom_word_groups(title=tmdb_info.get("name"),
+                                                        year=tmdb_info.get("first_air_date")[0:4],
+                                                        wtype=2,
+                                                        tmdbid=tmdb_id,
+                                                        season_count=tmdb_info.get("number_of_seasons"))
+                    return {"code": 0, "msg": ""}
+                else:
+                    return {"code": 1, "msg": "识别词组（TMDB ID）已存在"}
+            elif tmdb_type == "movie":
+                if not SqlHelper.is_custom_word_group_existed(tmdbid=tmdb_id, wtype=1):
+                    tmdb_info = Media().get_tmdb_info(mtype=MediaType.MOVIE, tmdbid=tmdb_id)
+                    if not tmdb_info:
+                        return {"code": 1, "msg": "添加失败，无法查询到TMDB信息"}
+                    SqlHelper.insert_custom_word_groups(title=tmdb_info.get("title"),
+                                                        year=tmdb_info.get("release_date")[0:4],
+                                                        wtype=1,
+                                                        tmdbid=tmdb_id,
+                                                        season_count=0)
+                    return {"code": 0, "msg": ""}
+                else:
+                    return {"code": 1, "msg": "识别词组（TMDB ID）已存在"}
+            else:
+                return {"code": 1, "msg": "无法识别媒体类型"}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __delete_custom_word_group(data):
+        try:
+            wid = data.get("gid")
+            SqlHelper.delete_custom_word_group(wid=wid)
+            WordsHelper().init_config()
+            return {"code": 0, "msg": ""}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __add_or_edit_custom_word(data):
+        try:
+            wid = data.get("id")
+            gid = data.get("gid")
+            group_type = data.get("group_type")
+            replaced = data.get("new_replaced")
+            replace = data.get("new_replace")
+            front = data.get("new_front")
+            back = data.get("new_back")
+            offset = data.get("new_offset")
+            whelp = data.get("new_help")
+            wtype = data.get("type")
+            season = data.get("season")
+            enabled = data.get("enabled")
+            regex = data.get("regex")
+            if wid:
+                SqlHelper.delete_custom_word(wid=wid)
+            # 电影
+            if group_type == "1":
+                season = -2
+            # 屏蔽
+            if wtype == "1":
+                if not SqlHelper.is_custom_words_existed(replaced=replaced):
+                    SqlHelper.insert_custom_word(replaced=replaced,
+                                                 replace="",
+                                                 front="",
+                                                 back="",
+                                                 offset=0,
+                                                 wtype=wtype,
+                                                 gid=gid,
+                                                 season=season,
+                                                 enabled=enabled,
+                                                 regex=regex,
+                                                 whelp=whelp if whelp else "")
+                    WordsHelper().init_config()
+                    return {"code": 0, "msg": ""}
+                else:
+                    return {"code": 1, "msg": "识别词已存在\n（被替换词：%s）" % replaced}
+            # 替换
+            elif wtype == "2":
+                if not SqlHelper.is_custom_words_existed(replaced=replaced):
+                    SqlHelper.insert_custom_word(replaced=replaced,
+                                                 replace=replace,
+                                                 front="",
+                                                 back="",
+                                                 offset=0,
+                                                 wtype=wtype,
+                                                 gid=gid,
+                                                 season=season,
+                                                 enabled=enabled,
+                                                 regex=regex,
+                                                 whelp=whelp if whelp else "")
+                    WordsHelper().init_config()
+                    return {"code": 0, "msg": ""}
+                else:
+                    return {"code": 1, "msg": "识别词已存在\n（被替换词：%s）" % replaced}
+            # 集偏移
+            elif wtype == "4":
+                if not SqlHelper.is_custom_words_existed(front=front, back=back):
+                    SqlHelper.insert_custom_word(replaced="",
+                                                 replace="",
+                                                 front=front,
+                                                 back=back,
+                                                 offset=offset,
+                                                 wtype=wtype,
+                                                 gid=gid,
+                                                 season=season,
+                                                 enabled=enabled,
+                                                 regex=regex,
+                                                 whelp=whelp if whelp else "")
+                    WordsHelper().init_config()
+                    return {"code": 0, "msg": ""}
+                else:
+                    return {"code": 1, "msg": "识别词已存在\n（前后定位词：%s@%s）" % (front, back)}
+            # 替换+集偏移
+            elif wtype == "3":
+                if not SqlHelper.is_custom_words_existed(replaced=replaced):
+                    SqlHelper.insert_custom_word(replaced=replaced,
+                                                 replace=replace,
+                                                 front=front,
+                                                 back=back,
+                                                 offset=offset,
+                                                 wtype=wtype,
+                                                 gid=gid,
+                                                 season=season,
+                                                 enabled=enabled,
+                                                 regex=regex,
+                                                 whelp=whelp if whelp else "")
+                    WordsHelper().init_config()
+                    return {"code": 0, "msg": ""}
+                else:
+                    return {"code": 1, "msg": "识别词已存在\n（被替换词：%s）" % replaced}
+            else:
+                return {"code": 1, "msg": ""}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __get_custom_word(data):
+        try:
+            wid = data.get("id")
+            word_info = SqlHelper.get_custom_words(wid=wid)[0]
+            word = {"id": word_info[0],
+                    "replaced": word_info[1],
+                    "replace": word_info[2],
+                    "front": word_info[3],
+                    "back": word_info[4],
+                    "offset": word_info[5],
+                    "type": word_info[6],
+                    "group_id": word_info[7],
+                    "season": word_info[8],
+                    "enabled": word_info[9],
+                    "regex": word_info[10],
+                    "help": word_info[11], }
+            return {"code": 0, "data": word}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": "查询识别词失败"}
+
+    @staticmethod
+    def __delete_custom_word(data):
+        try:
+            wid = data.get("id")
+            SqlHelper.delete_custom_word(wid)
+            WordsHelper().init_config()
+            return {"code": 0, "msg": ""}
+        except Exception as e:
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __check_custom_words(data):
+        try:
+            flag_dict = {"enable": 1, "disable": 0}
+            ids_info = data.get("ids_info")
+            enabled = flag_dict.get(data.get("flag"))
+            ids = [id_info.split("_")[1] for id_info in ids_info]
+            for wid in ids:
+                SqlHelper.check_custom_word(wid=wid, enabled=enabled)
+            WordsHelper().init_config()
+            return {"code": 0, "msg": ""}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": "识别词状态设置失败"}
+
+    @staticmethod
+    def __export_custom_words(data):
+        try:
+            note = data.get("note")
+            ids_info = data.get("ids_info").split("@")
+            group_ids = []
+            word_ids = []
+            for id_info in ids_info:
+                wid = id_info.split("_")
+                group_ids.append(wid[0])
+                word_ids.append(wid[1])
+            export_dict = {}
+            for group_id in group_ids:
+                if group_id == "-1":
+                    export_dict["-1"] = {"id": -1,
+                                         "title": "通用",
+                                         "type": 1,
+                                         "words": {}, }
+                else:
+                    group_info = SqlHelper.get_custom_word_groups(gid=group_id)[0]
+                    export_dict[str(group_info[0])] = {"id": group_info[0],
+                                                       "title": group_info[1],
+                                                       "year": group_info[2],
+                                                       "type": group_info[3],
+                                                       "tmdbid": group_info[4],
+                                                       "season_count": group_info[5],
+                                                       "words": {}, }
+            for word_id in word_ids:
+                word_info = SqlHelper.get_custom_words(wid=word_id)[0]
+                export_dict[str(word_info[7])]["words"][str(word_info[0])] = {"id": word_info[0],
+                                                                              "replaced": word_info[1],
+                                                                              "replace": word_info[2],
+                                                                              "front": word_info[3],
+                                                                              "back": word_info[4],
+                                                                              "offset": word_info[5],
+                                                                              "type": word_info[6],
+                                                                              "season": word_info[8],
+                                                                              "regex": word_info[10],
+                                                                              "help": word_info[11], }
+            export_string = json.dumps(export_dict) + "@@@@@@" + str(note)
+            string = base64.b64encode(export_string.encode("utf-8")).decode('utf-8')
+            return {"code": 0, "string": string}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __analyse_import_custom_words_code(data):
+        try:
+            import_code = data.get('import_code')
+            string = base64.b64decode(import_code.encode("utf-8")).decode('utf-8').split("@@@@@@")
+            note_string = string[1]
+            import_dict = json.loads(string[0])
+            groups = []
+            for group in import_dict.values():
+                wid = group.get('id')
+                title = group.get("title")
+                year = group.get("year")
+                wtype = group.get("type")
+                tmdbid = group.get("tmdbid")
+                season_count = group.get("season_count") or ""
+                words = group.get("words")
+                if tmdbid:
+                    link = "https://www.themoviedb.org/%s/%s" % ("movie" if int(wtype) == 1 else "tv", tmdbid)
+                else:
+                    link = ""
+                groups.append({"id": wid,
+                               "name": "%s（%s）" % (title, year) if year else title,
+                               "link": link,
+                               "type": wtype,
+                               "seasons": season_count,
+                               "words": words})
+            return {"code": 0, "groups": groups, "note_string": note_string}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __import_custom_words(data):
+        try:
+            import_code = data.get('import_code')
+            ids_info = data.get('ids_info')
+            string = base64.b64decode(import_code.encode("utf-8")).decode('utf-8').split("@@@@@@")
+            import_dict = json.loads(string[0])
+            import_group_ids = [id_info.split("_")[0] for id_info in ids_info]
+            group_id_dict = {}
+            for import_group_id in import_group_ids:
+                import_group_info = import_dict.get(import_group_id)
+                if int(import_group_info.get("id")) == -1:
+                    group_id_dict["-1"] = -1
+                    continue
+                title = import_group_info.get("title")
+                year = import_group_info.get("year")
+                wtype = import_group_info.get("type")
+                tmdbid = import_group_info.get("tmdbid")
+                season_count = import_group_info.get("season_count")
+                if not SqlHelper.is_custom_word_group_existed(tmdbid=tmdbid, wtype=wtype):
+                    SqlHelper.insert_custom_word_groups(title=title,
+                                                        year=year,
+                                                        wtype=wtype,
+                                                        tmdbid=tmdbid,
+                                                        season_count=season_count)
+                group_info = SqlHelper.get_custom_word_groups(tmdbid=tmdbid, wtype=wtype)
+                group_id_dict[import_group_id] = group_info[0][0]
+            for id_info in ids_info:
+                id_info = id_info.split('_')
+                import_group_id = id_info[0]
+                import_word_id = id_info[1]
+                import_word_info = import_dict.get(import_group_id).get("words").get(import_word_id)
+                gid = group_id_dict.get(import_group_id)
+                replaced = import_word_info.get("replaced")
+                replace = import_word_info.get("replace")
+                front = import_word_info.get("front")
+                back = import_word_info.get("back")
+                offset = import_word_info.get("offset")
+                whelp = import_word_info.get("help")
+                wtype = int(import_word_info.get("type"))
+                season = import_word_info.get("season")
+                regex = import_word_info.get("regex")
+                # 屏蔽, 替换, 替换+集偏移
+                if wtype in [1, 2, 3]:
+                    if SqlHelper.is_custom_words_existed(replaced=replaced):
+                        return {"code": 1, "msg": "识别词已存在\n（被替换词：%s）" % replaced}
+                # 集偏移
+                elif wtype == 4:
+                    if SqlHelper.is_custom_words_existed(front=front, back=back):
+                        return {"code": 1, "msg": "识别词已存在\n（前后定位词：%s@%s）" % (front, back)}
+                SqlHelper.insert_custom_word(replaced=replaced,
+                                             replace=replace,
+                                             front=front,
+                                             back=back,
+                                             offset=offset,
+                                             wtype=wtype,
+                                             gid=gid,
+                                             season=season,
+                                             enabled=1,
+                                             regex=regex,
+                                             whelp=whelp if whelp else "")
+            WordsHelper().init_config()
+            return {"code": 0, "msg": ""}
+        except Exception as e:
+            print(str(e))
+            return {"code": 1, "msg": str(e)}
+
+    @staticmethod
+    def __get_categories(data):
+        if data.get("type") == "电影":
+            categories = Category().get_movie_categorys()
+        elif data.get("type") == "电视剧":
+            categories = Category().get_tv_categorys()
+        else:
+            categories = Category().get_anime_categorys()
+        return {"code": 0, "category": list(categories), "id": data.get("id"), "value": data.get("value")}
+
+    @staticmethod
+    def __delete_rss_history(data):
+        rssid = data.get("rssid")
+        SqlHelper.delete_rss_history(rssid=rssid)
+        return {"code": 0}
+
+    @staticmethod
+    def __re_rss_history(data):
+        rssid = data.get("rssid")
+        rtype = data.get("type")
+        rssinfo = SqlHelper.get_rss_history(rtype=rtype, rid=rssid)
+        if rssinfo:
+            if rtype == "MOV":
+                mtype = MediaType.MOVIE
+            else:
+                mtype = MediaType.TV
+            if rssinfo[0][6]:
+                season = int(str(rssinfo[0][6]).replace("S", ""))
+            else:
+                season = None
+            code, msg, _ = Subscribe.add_rss_subscribe(mtype=mtype,
+                                                       name=rssinfo[0][3],
+                                                       year=rssinfo[0][4],
+                                                       season=season,
+                                                       tmdbid=rssinfo[0][5],
+                                                       total_ep=rssinfo[0][9],
+                                                       current_ep=rssinfo[0][10])
+            return {"code": code, "msg": msg}
+        else:
+            return {"code": 1, "msg": "订阅历史记录不存在"}
+
+    @staticmethod
+    def __share_filtergroup(data):
+        gid = data.get("id")
+        group_info = SqlHelper.get_config_filter_group(gid=gid)
+        if not group_info:
+            return {"code": 1, "msg": "规则组不存在"}
+        group_rules = SqlHelper.get_config_filter_rule(groupid=gid)
+        if not group_rules:
+            return {"code": 1, "msg": "规则组没有对应规则"}
+        rules = []
+        for rule in group_rules:
+            rules.append({
+                "name": rule[2],
+                "pri": rule[3],
+                "include": rule[4],
+                "exclude": rule[5],
+                "size": rule[6],
+                "free": rule[7]
+            })
+        rule_json = {
+            "name": group_info[0][1],
+            "rules": rules
+        }
+        json_string = base64.b64encode(json.dumps(rule_json).encode("utf-8")).decode('utf-8')
+        return {"code": 0, "string": json_string}
+
+    @staticmethod
+    def __import_filtergroup(data):
+        content = data.get("content")
+        try:
+            json_str = base64.b64decode(str(content).encode("utf-8")).decode('utf-8')
+            json_obj = json.loads(json_str)
+            if json_obj:
+                if not json_obj.get("name"):
+                    return {"code": 1, "msg": "数据格式不正确"}
+                SqlHelper.add_filter_group(name=json_obj.get("name"))
+                group_id = SqlHelper.get_filter_groupid_by_name(json_obj.get("name"))
+                if not group_id:
+                    return {"code": 1, "msg": "数据内容不正确"}
+                if json_obj.get("rules"):
+                    for rule in json_obj.get("rules"):
+                        SqlHelper.insert_filter_rule(item={
+                            "group": group_id,
+                            "name": rule.get("name"),
+                            "pri": rule.get("pri"),
+                            "include": rule.get("include"),
+                            "exclude": rule.get("exclude"),
+                            "size": rule.get("size"),
+                            "free": rule.get("free")
+                        })
+                FilterRule().init_config()
+            return {"code": 0, "msg": ""}
+        except Exception as err:
+            return {"code": 1, "msg": "数据格式不正确，%s" % str(err)}

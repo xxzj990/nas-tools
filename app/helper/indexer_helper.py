@@ -25,7 +25,19 @@ class IndexerHelper:
     def get_all_indexers(self):
         return self._indexers
 
-    def get_indexer(self, url, cookie=None, name=None, rule=None, public=None):
+    def get_indexer(self,
+                    url,
+                    cookie=None,
+                    name=None,
+                    rule=None,
+                    public=None,
+                    proxy=False,
+                    parser=None,
+                    ua=None,
+                    render=False,
+                    language=None,
+                    pri=None,
+                    favicon=None):
         if not url:
             return None
         for indexer in self._indexers:
@@ -36,13 +48,34 @@ class IndexerHelper:
                                    cookie=RequestUtils.cookie_parse(cookie),
                                    name=name,
                                    rule=rule,
-                                   public=public)
+                                   public=public,
+                                   proxy=proxy,
+                                   parser=parser,
+                                   ua=ua,
+                                   render=render,
+                                   buildin=True,
+                                   language=language,
+                                   pri=pri,
+                                   favicon=favicon)
         return None
 
 
 class IndexerConf(object):
 
-    def __init__(self, datas=None, cookie=None, name=None, rule=None, public=None):
+    def __init__(self,
+                 datas=None,
+                 cookie=None,
+                 name=None,
+                 rule=None,
+                 public=None,
+                 proxy=False,
+                 parser=None,
+                 ua=None,
+                 render=False,
+                 buildin=True,
+                 language=None,
+                 pri=None,
+                 favicon=None):
         if not datas:
             return
         self.datas = datas
@@ -56,6 +89,14 @@ class IndexerConf(object):
         self.cookie = cookie
         self.rule = rule
         self.public = public
+        self.proxy = proxy
+        self.parser = parser
+        self.ua = ua
+        self.render = render
+        self.buildin = buildin
+        self.language = language
+        self.pri = pri if pri else 0
+        self.favicon = favicon
 
     def get_userinfo(self):
         return self.userinfo

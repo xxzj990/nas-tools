@@ -1,5 +1,7 @@
-from threading import Lock
+from threading import Event, Lock
 from urllib.parse import urlencode
+from app.helper.thread_helper import ThreadHelper
+import requests
 
 import log
 from config import Config
@@ -16,8 +18,10 @@ class Telegram(IMessageChannel):
     __telegram_token = None
     __telegram_chat_id = None
     __webhook_url = None
+    __telegram_user_ids = []
     __domain = None
     __config = None
+    __message_proxy_event = None
 
     def __init__(self):
         self.init_config()
@@ -28,7 +32,7 @@ class Telegram(IMessageChannel):
         if app:
             self.__domain = app.get('domain')
             if self.__domain:
-                if not self.__domain.startswith('http://') and not self.__domain.startswith('https://'):
+                if not self.__domain.startswith('http'):
                     self.__domain = "http://" + self.__domain
                 if not self.__domain.endswith('/'):
                     self.__domain = self.__domain + "/"
@@ -36,12 +40,26 @@ class Telegram(IMessageChannel):
         if message:
             self.__telegram_token = message.get('telegram', {}).get('telegram_token')
             self.__telegram_chat_id = message.get('telegram', {}).get('telegram_chat_id')
+            telegram_user_ids = message.get('telegram', {}).get('telegram_user_ids')
+            if telegram_user_ids:
+                self.__telegram_user_ids = telegram_user_ids.split(",")
+            else:
+                self.__telegram_user_ids = []
             if self.__telegram_token \
-                    and self.__telegram_chat_id \
-                    and message.get('telegram', {}).get('webhook') \
-                    and self.__domain:
-                self.__webhook_url = "%stelegram" % self.__domain
-                self.__set_bot_webhook()
+                    and self.__telegram_chat_id:
+                if message.get('telegram', {}).get('webhook'):
+                    if self.__domain:
+                        self.__webhook_url = "%stelegram" % self.__domain
+                        self.__set_bot_webhook()
+                    if self.__message_proxy_event:
+                        self.__message_proxy_event.set()
+                        self.__message_proxy_event = None
+                else:
+                    self.__del_bot_webhook()
+                    if not self.__message_proxy_event:
+                        event = Event()
+                        self.__message_proxy_event = event
+                        ThreadHelper().start_thread(self.__start_telegram_message_proxy, [event])
 
     def get_status(self):
         """
@@ -49,7 +67,7 @@ class Telegram(IMessageChannel):
         """
         flag, msg = self.send_msg("测试", "这是一条测试消息")
         if not flag:
-            log.error("【MSG】发送消息失败：%s" % msg)
+            log.error("【Telegram】发送消息失败：%s" % msg)
         return flag
 
     def get_admin_user(self):
@@ -168,11 +186,11 @@ class Telegram(IMessageChannel):
             if res:
                 json = res.json()
                 if json.get("ok"):
-                    log.info("TelegramBot Webhook 设置成功，地址为：%s" % self.__webhook_url)
+                    log.info("【Telegram】Webhook 设置成功，地址为：%s" % self.__webhook_url)
                 else:
-                    log.error("TelegramBot Webhook 设置失败：" % json.get("description"))
+                    log.error("【Telegram】Webhook 设置失败：" % json.get("description"))
             else:
-                log.error("TelegramBot Webhook 设置失败：网络连接故障！")
+                log.error("【Telegram】Webhook 设置失败：网络连接故障！")
 
     def __get_bot_webhook(self):
         """
@@ -186,11 +204,11 @@ class Telegram(IMessageChannel):
                 result = res.json().get("result") or {}
                 webhook_url = result.get("url") or ""
                 if webhook_url:
-                    log.info("TelegramBot Webhook 地址为：%s" % webhook_url)
+                    log.info("【Telegram】Webhook 地址为：%s" % webhook_url)
                 pending_update_count = result.get("pending_update_count")
                 last_error_message = result.get("last_error_message")
                 if pending_update_count and last_error_message:
-                    log.warn("TelegramBot Webhook 有 %s 条消息挂起，最后一次失败原因为：%s" % (pending_update_count, last_error_message))
+                    log.warn("【Telegram】Webhook 有 %s 条消息挂起，最后一次失败原因为：%s" % (pending_update_count, last_error_message))
                 if webhook_url == self.__webhook_url:
                     return 1
                 else:
@@ -211,3 +229,50 @@ class Telegram(IMessageChannel):
             return True
         else:
             return False
+
+    def get_users(self):
+        """
+        获取Telegram配置文件中的User Ids，即允许使用telegram机器人的user_id列表
+        """
+        return self.__telegram_user_ids
+
+    @staticmethod
+    def __start_telegram_message_proxy(event: Event):
+        log.info("【Telegram】消息接收服务启动")
+
+        long_poll_timeout = 5
+
+        def consume_messages(_config, _offset, _sc_url, _ds_url):
+            try:
+                values = {"timeout": long_poll_timeout, "offset": _offset}
+                res = RequestUtils(proxies=_config.get_proxies()).get_res(_sc_url + urlencode(values))
+                if res and res.json():
+                    for msg in res.json().get("result", []):
+                        # 无论本地是否成功，先更新offset，即消息最多成功消费一次
+                        _offset = msg["update_id"] + 1
+                        log.info("【Telegram】接收到消息: %s" % msg)
+                        local_res = requests.post(_ds_url, json=msg, timeout=10)
+                        log.debug("【Telegram】message: %s processed, response is: %s" % (msg, local_res.text))
+            except Exception as e:
+                log.error("【Telegram】消息接收出现错误: %s" % e)
+            return _offset
+
+        offset = 0
+        while True:
+            # read config from config.yaml directly to make config.yaml changes aware 
+            config = Config()
+            message = config.get_config("message")
+            channel = message.get("msg_channel")
+            telegram_token = message.get('telegram', {}).get('telegram_token')
+            web_port = config.get_config("app").get("web_port")
+            sc_url = "https://api.telegram.org/bot%s/getUpdates?" % telegram_token
+            ds_url = "http://127.0.0.1:%s/telegram" % web_port
+            telegram_webhook = message.get('telegram', {}).get('webhook')
+            if not channel == "telegram" or not telegram_token or telegram_webhook:
+                log.info("【Telegram】消息接收服务已停止")
+                break
+
+            i = 0
+            while i < 20 and not event.is_set():
+                offset = consume_messages(config, offset, sc_url, ds_url)
+                i = i + 1

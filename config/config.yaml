@@ -32,6 +32,8 @@ app:
   # 【TMDB API KEY】：需要在https://www.themoviedb.org/申请，必须配置，否则无法识别媒体资源和重命名
   # 以下地址需要网络能够正常访问：api.themoviedb.org、webservice.fanart.tv
   rmt_tmdbkey:
+  # 【使用TMDB服务器域名】：api.themoviedb.org、api.tmdb.org，如api.themoviedb.org无法访问可偿试使用api.tmdb.org
+  tmdb_domain: api.tmdb.org
   # 【TMDB匹配模式】：normal、strict，normal模式下如使用文件名/种子名中的年份无法匹配到媒体信息，会去掉年份再匹配一次；strict模式则严格按文件中年份匹配
   # normal模式下会提升识别成功率，但也可能会导致误识别率增加；strict模式可以降低误识别率，但可能导致很多文件名/种子名中年份不正确的无法被识别（特别是剧集，需要是首播年份）
   rmt_match_mode: normal
@@ -45,6 +47,8 @@ app:
   domain: ''
   # 【UserAgent】：可适当修改，用于站点签到、豆瓣数据抓取等
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
+  # 【登录界面壁纸】：themoviedb、bing，设置为themoviedb时需要配置TMDB API Key时才生效
+  wallpaper: bing
 
 # 【配置媒体库信息】
 media:
@@ -70,13 +74,17 @@ media:
   category: 'default-category'
   # 【转移到媒体库的最小文件大小】：避免预告片/MV等影响识别，单位M
   min_filesize: 150
+  # 【文件转移忽略词】：文件名包含忽略词，忽略转移
+  ignored_files:
+  # 【转移文件夹黑名单】：文件上级文件夹在黑名单中，忽略转移
+  ignored_paths:
   # 【洗版开关】：如开启则则新下载了更大的文件会覆盖媒体库目录中已有的文件
   filesize_cover: true
   # 【电影命名定义】：程序会按定义的命名格式对电影进行重命名；/代表上下级目录，{}内为占位符；占位符会使用文件识别出来的实际值替换；占位符外的字符会当成普通字符，直接体现在名称上
-  # 电影占位符有：{title}：标题，{en_title}：英文标题，{original_title}：原语种标题，{original_name}：原文件名，{year}：年份，{edition}：版本(Bluray/WEB-DL等)，{videoFormat}：分辨率(1080p/4k等)，{videoCodec}：视频编码，{audioCodec}：音频编码及声道，{tmdbid}：TMDB的ID，{part}：part1/disc1/dvd1等
+  # 电影占位符有：{title}：标题，{en_title}：英文标题，{original_title}：原语种标题，{original_name}：原文件名，{year}：年份，{edition}：版本(Bluray/WEB-DL等)，{videoFormat}：分辨率(1080p/4k等)，{videoCodec}：视频编码，{audioCodec}：音频编码及声道，{tmdbid}：TMDB的ID，{part}：part1/disc1/dvd1，{releaseGroup}：制作组/字幕组等
   movie_name_format: '{title} ({year})/{title}-{part} ({year}) - {videoFormat}'
   # 【电视剧命名定义】：程序会按定义的命名格式对电视剧进行重命名；/代表上下级目录，{}内为占位符；占位符会使用文件识别出来的实际值替换，占位符外的字符会当成普通字符，直接体现在名称上
-  # 电视剧占位符有：{title}：标题，{en_title}：英文标题，{original_title}：原语种标题，{original_name}：原文件名，{year}：年份，{edition}：版本(Bluray/WEB-DL等)，{videoFormat}：分辨率(1080p/4k等)，{videoCodec}：视频编码，{audioCodec}：音频编码及声道，{tmdbid}：TMDB的ID，{season}：季数，{episode}：集数，{season_episode}：剧集SxxExx，{part}：part1/disc1/dvd1等
+  # 电视剧占位符有：{title}：标题，{en_title}：英文标题，{original_title}：原语种标题，{original_name}：原文件名，{year}：年份，{edition}：版本(Bluray/WEB-DL等)，{videoFormat}：分辨率(1080p/4k等)，{videoCodec}：视频编码，{audioCodec}：音频编码及声道，{tmdbid}：TMDB的ID，{season}：季数，{episode}：集数，{season_episode}：剧集SxxExx，{part}：part1/disc1/dvd1，{releaseGroup}：制作组/字幕组等
   tv_name_format: '{title} ({year})/Season {season}/{title}-{part} - {season_episode} - 第{episode}集'
   # 【刮削元数据及图片】：开启后文件转移完成时会自动生成nfo描述文件及poster海报，协助媒体服务器识别和搜刮
   nfo_poster: false
@@ -101,6 +109,8 @@ jellyfin:
 plex:
   # 【Plex服务器IP地址和端口】：注意区分http和https，http时可以不加http://，https时必须加https://
   host: http://127.0.0.1:32400
+  # 【X-Plex-Token】：Plex页面Cookie中的X-Plex-Token，如填写token则无需填写servername、username、password
+  token:
   # 【Plex服务器的名称】
   servername:
   # 【Plex用户名】
@@ -203,9 +213,12 @@ message:
     telegram_token:
     # telegram中关注getuserID获取
     telegram_chat_id:
-    # 【webhook开关】：打开该开关会对该机器人设置WebHook，实现在聊天窗口运行服务及进行远程资源检索下载，只有管理员用户可以使用命令
-    # 注意：受Telegram限制，程序外网访问地址需要设置为以下端口之一：443, 80, 88, 8443，且需要有公网认证的可信SSL证书
-    webhook: true
+    # 允许使用telegram机器人的user id，使用,分隔
+    telegram_user_ids:
+    # 【webhook开关】：Telegram机器人消息有两种模式：WebHook或消息轮循；
+    # 开启后将使用WebHook方式，需要在基础设置为正确配置好外网访问地址，同时受Telegram官方限制，外网访问地址需要设置为以下端口之一：443, 80, 88, 8443，且需要有公网认证的可信SSL证书
+    # 关闭后将使用消息轮循方式，推荐关闭
+    webhook: false
   # 【Bark通知】，手机上安装Bark客户端，Server可以使用默认的也可以自己搭建，自己搭建的更换为服务器地址和端口，格式：http(s)://IP:PORT
   bark:
     # 自己搭建请更换，否则保持默认
@@ -246,7 +259,7 @@ pt:
   pt_monitor: false
   # 【只监控NASTool添加的下载】：启用后只有NASTool添加的下载才会被自动转移和显示，关闭则下载软件中所有的任务都会转移和显示
   pt_monitor_only: true
-  # 【下载完成后转移到媒体库的转移模式】：link、copy、softlink、move、rclone、rclonecopy，详情参考顶部说明
+  # 【下载完成后转移到媒体库的转移模式】：link、copy、softlink、move、rclone、rclonecopy、minio、miniocopy，详情参考顶部说明
   rmt_mode: link
   #【聚合检索使用的检索器】：jackett、prowlarr、builtin，需要配置jackett或prowlarr对应的配置区域，builtin为内置索引器需要在配置文件目录/sites目录下存入对应的站点配置文件
   # 1、通过微信发送关键字，实时检索下载，发送格式示例：电视剧 西部世界、西部世界第1季、西部世界第1季第2集、西部世界 2022，只会匹配真实名称，命中后会自动下载，使用说明参考：https://github.com/jxxghp/nas-tools/wiki/
@@ -300,16 +313,6 @@ qbittorrent:
   qbpassword:
   # 转移完成后是否自动强制作种，按需要设置
   force_upload: true
-  # 下载文件保存路径，传递给下载器使用
-  save_path:
-    movie:
-    tv:
-    anime:
-  # NASTool访问下载文件的映射路径
-  save_containerpath:
-    movie:
-    tv:
-    anime:
 
 # 【配置transmission下载软件】：pt区的pt_client如配置为transmission则需要同步配置该项，需要3.0以上版本，否则可能会报错
 transmission:
@@ -319,31 +322,11 @@ transmission:
   # transmission 登录用户名和密码
   trusername:
   trpassword:
-  # 下载文件保存路径，传递给下载器使用
-  save_path:
-    movie:
-    tv:
-    anime:
-  # NASTool访问下载文件的映射路径
-  save_containerpath:
-    movie:
-    tv:
-    anime:
 
-# 配置115网盘下载器
+# 配置 115 网盘下载器
 client115:
   # 115 Cookie 抓包获取
   cookie:
-  # 下载文件保存路径，传递给下载器使用
-  save_path:
-    movie:
-    tv:
-    anime:
-  # NASTool访问下载文件的映射路径
-  save_containerpath:
-    movie:
-    tv:
-    anime:
 
 # 配置Aria2下载器
 aria2:
@@ -353,16 +336,9 @@ aria2:
   port:
   # 密码令牌
   secret:
-  # 下载文件保存路径，传递给下载器使用
-  save_path:
-    movie:
-    tv:
-    anime:
-  # NASTool访问下载文件的映射路径
-  save_containerpath:
-    movie:
-    tv:
-    anime:
+
+# 【下载目录】：配置下载目录，自按分类下载到指定目录
+downloaddir:
 
 # 【配置豆瓣账号信息】：配置后会自动同步豆瓣收藏，豆瓣标记想看内容后，后台自动下载
 douban:
@@ -387,12 +363,10 @@ douban:
 subtitle:
   # 【下载渠道】：opensubtitles、chinesesubfinder
   server: opensubtitles
-  # 配置OpenSubtitles.org中注册的用户名和密码
+  # opensubtitles.org
   opensubtitles:
-    # 用户名
-    username:
-    # 密码
-    password:
+    # 是否启用
+    enable: true
   # 配置ChineseSubFinder的服务器地址和API Key，API Key在ChineseSubFinder->配置中心->实验室->API Key处生成
   chinesesubfinder:
     # IP地址和端口
@@ -412,7 +386,7 @@ security:
     ipv6: ::/0
   # 【Telegram webhook允许ip范围】：即只有如下范围的IP才允许调用webhook
   telegram_webhook_allow_ip:
-    ipv4: 149.154.160.0/20,91.108.4.0/22
+    ipv4: 127.0.0.1
     ipv6: ::/0
   # 【订阅API认证密钥】：用于Jellyseerr、Overseerr中Authorization认证
   subscribe_token:
@@ -422,8 +396,10 @@ laboratory:
   # 【识别增强】关键字猜想
   search_keyword: false
   # 【TMDB缓存过期策略】：是否开启TMDB缓存过期策略，默认7天过期，过期缓存将被删除,  7天内访问过期时间可以被刷新
-  tmdb_cache_expire: false
+  tmdb_cache_expire: true
   # 【使用豆瓣名称联想】：开启将使用豆瓣进行电影电视剧的名称联想，否则使用TMDB的数据
-  use_douban_titles: true
+  use_douban_titles: false
   # 【精确搜索使用英文名称】：开启后对于精确搜索场景（远程搜索、订阅搜索等）将会使用英文名检索站点资源以提升匹配度，但对有些站点资源标题全是中文的则需要关闭，否则匹配不到
-  search_en_title: false
+  search_en_title: true
+  # 【使用TMDB代理】
+  tmdb_proxy: false

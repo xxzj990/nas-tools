@@ -311,12 +311,12 @@ class Scraper:
                                             file_name=file_name)
                 # poster
                 if scraper_movie_pic.get("poster"):
-                    poster_image = media.get_poster_image()
+                    poster_image = media.get_poster_image(original=True)
                     if poster_image:
                         self.__save_image(poster_image, dir_path)
                 # backdrop
                 if scraper_movie_pic.get("backdrop"):
-                    backdrop_image = media.get_backdrop_image()
+                    backdrop_image = media.get_backdrop_image(default=False, original=True)
                     if backdrop_image:
                         self.__save_image(backdrop_image, dir_path, "fanart")
                 # background
@@ -350,7 +350,7 @@ class Scraper:
                 scraper_tv_nfo = scraper_nfo.get("tv")
                 scraper_tv_pic = scraper_pic.get("tv")
                 # 处理根目录
-                if not os.path.exists(os.path.join(dir_path, "tvshow.nfo")):
+                if not os.path.exists(os.path.join(os.path.dirname(dir_path), "tvshow.nfo")):
                     if scraper_tv_nfo.get("basic") or scraper_tv_nfo.get("credits"):
                         # 查询Douban信息
                         if scraper_tv_nfo.get("credits") and scraper_tv_nfo.get("credits_chinese"):
@@ -361,12 +361,12 @@ class Scraper:
                         self.gen_tv_nfo_file(media.tmdb_info, doubaninfo, scraper_tv_nfo, os.path.dirname(dir_path))
                     # poster
                     if scraper_tv_pic.get("poster"):
-                        poster_image = media.get_poster_image()
+                        poster_image = media.get_poster_image(original=True)
                         if poster_image:
                             self.__save_image(poster_image, os.path.dirname(dir_path))
                     # backdrop
                     if scraper_tv_pic.get("backdrop"):
-                        backdrop_image = media.get_backdrop_image()
+                        backdrop_image = media.get_backdrop_image(default=False, original=True)
                         if backdrop_image:
                             self.__save_image(backdrop_image, os.path.dirname(dir_path), "fanart")
                     # background

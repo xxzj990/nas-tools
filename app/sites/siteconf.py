@@ -1,15 +1,4 @@
-from app.utils import StringUtils
-
-
 class SiteConf:
-    # 非常规RSS站点
-    RSS_EXTRA_SITES = {
-        'blutopia.xyz': 'Unit3D',
-        'desitorrents.tv': 'Unit3D',
-        'jptv.club': 'Unit3D',
-        'www.torrentseeds.org': 'Unit3D',
-        'beyond-hd.me': 'beyondhd',
-    }
     # 检测种子促销的站点XPATH，不在此清单的无法开启仅RSS免费种子功能
     RSS_SITE_GRAP_CONF = {
         'pthome.net': {
@@ -165,7 +154,7 @@ class SiteConf:
         'ourbits.club': {
             'FREE': ["//font[@class='free']"],
             '2XFREE': ["//font[@class='twoupfree']"],
-            'HR': [],
+            'HR': ["//img[@class='hitandrun']"],
             'PEER_COUNT': [],
         },
         'pt.btschool.club': {
@@ -201,14 +190,14 @@ class SiteConf:
         'chdbits.co': {
             'FREE': ["//img[@class='pro_free']"],
             '2XFREE': [],
-            'HR': [],
+            'HR': ["//b[contains(text(),'H&R:')]"],
             'PEER_COUNT': [],
         },
         'hdchina.org': {
             'FREE': ["//img[@class='pro_free']"],
-            '2XFREE': [],
+            '2XFREE': ["//img[@class='pro_free2up"],
             'HR': [],
-            'PEER_COUNT': [],
+            'PEER_COUNT': ["//div[@id='peercount']/b[1]"],
         },
         "ccfbits.org": {
             'FREE': ["//font[@color='red'][text()='本种子不计下载量，只计上传量!']"],
@@ -306,43 +295,125 @@ class SiteConf:
             'HR': ["//img[@class='hitandrun']"],
             'PEER_COUNT': ["//div[@id='peercount']/b[1]"],
         },
+        'club.hares.top': {
+            'FREE': ["//b[@class='free'][text()='免费']"],
+            '2XFREE': ["//b[@class='twoupfree'][text()='2X免费']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'www.hddolby.com': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'piggo.me': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': ["//img[@class='hitandrun']"],
+            'PEER_COUNT': [],
+        },
+        'pt.0ff.cc': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': ["//img[@class='hitandrun']"],
+            'PEER_COUNT': [],
+        },
+        'wintersakura.net': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'pt.hdupt.com': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'pt.upxin.net': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'www.nicept.net': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'ptchina.org': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': ["//font[@class='twoupfree']"],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'www.hd.ai': {
+            'FREE': ["//img[@class='pro_free']"],
+            '2XFREE': [],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
+        'hhanclub.top': {
+            'FREE': ["//font[@class='free']"],
+            '2XFREE': [],
+            'HR': [],
+            'PEER_COUNT': [],
+        },
     }
     # 公共BT站点
-    PUBLIC_TORRENT_SITES = [
-        'rarbg.to',
-        'dmhy.org',
-        'eztv.re'
-    ]
-
-    def get_extrasite_conf(self, url):
-        """
-        根据地址找到RSS_EXTRA_SITES对应配置
-        """
-        for k, v in self.RSS_EXTRA_SITES.items():
-            if StringUtils.url_equal(k, url):
-                return v
-        return None
-
-    def get_grapsite_conf(self, url):
-        """
-        根据地址找到RSS_SITE_GRAP_CONF对应配置
-        """
-        for k, v in self.RSS_SITE_GRAP_CONF.items():
-            if StringUtils.url_equal(k, url):
-                return v
-        return {}
-
-    def is_public_site(self, url):
-        """
-        判断是否为公开BT站点
-        """
-        _, netloc = StringUtils.get_url_netloc(url)
-        if netloc in self.PUBLIC_TORRENT_SITES:
-            return True
-        return False
-
-    def get_public_sites(self):
-        """
-        查询所有公开BT站点
-        """
-        return self.PUBLIC_TORRENT_SITES
+    PUBLIC_TORRENT_SITES = {
+        'rarbg.to': {
+            "parser": "rarbg",
+            "proxy": True,
+            "language": "en"
+        },
+        'dmhy.org': {
+            "proxy": True
+        },
+        'eztv.re': {
+            "proxy": True,
+            "language": "en"
+        },
+        'acg.rip': {
+            "proxy": False
+        },
+        'thepiratebay.org': {
+            "proxy": True,
+            "render": True,
+            "language": "en"
+        },
+        'nyaa.si': {
+            "proxy": True,
+            "language": "en"
+        },
+        '1337x.to': {
+            "proxy": True,
+            "language": "en"
+        },
+        'ext.to': {
+            "proxy": True,
+            "language": "en"
+        },
+        'torrentgalaxy.to': {
+            "proxy": True,
+            "language": "en"
+        },
+        'mikanani.me': {
+            "proxy": False
+        },
+        'gaoqing.fm': {
+            "proxy": False
+        },
+        'www.mp4ba.vip': {
+            "proxy": False
+        },
+        'www.miobt.com': {
+            "proxy": True
+        },
+        'katcr.to': {
+            "proxy": True,
+            "language": "en"
+        }
+    }

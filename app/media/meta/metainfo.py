@@ -1,6 +1,8 @@
 import os.path
-import re
+import regex as re
 
+import log
+from app.helper.words_helper import WordsHelper
 from app.media.meta.metaanime import MetaAnime
 from app.media.meta.metavideo import MetaVideo
 from app.utils.types import MediaType
@@ -15,14 +17,28 @@ def MetaInfo(title, subtitle=None, mtype=None):
     :param mtype: 指定识别类型，为空则自动识别类型
     :return: MetaAnime、MetaVideo
     """
-    if os.path.splitext(title)[-1] in RMT_MEDIAEXT:
+
+    # 应用自定义识别词
+    title, msg, used_info = WordsHelper().process(title)
+    if msg:
+        log.warn("【Meta】%s" % msg)
+
+    # 判断是否处理文件
+    if title and os.path.splitext(title)[-1] in RMT_MEDIAEXT:
         fileflag = True
     else:
         fileflag = False
+
     if mtype == MediaType.ANIME or is_anime(title):
-        return MetaAnime(title, subtitle, fileflag)
+        meta_info = MetaAnime(title, subtitle, fileflag)
     else:
-        return MetaVideo(title, subtitle, fileflag)
+        meta_info = MetaVideo(title, subtitle, fileflag)
+
+    meta_info.ignored_words = used_info.get("ignored")
+    meta_info.replaced_words = used_info.get("replaced")
+    meta_info.offset_words = used_info.get("offset")
+
+    return meta_info
 
 
 def is_anime(name):

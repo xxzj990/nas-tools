@@ -27,14 +27,15 @@ class MetaVideo(MetaBase):
     _roman_numerals = r"^(?=[MDCLXVI])M*(C[MD]|D?C{0,3})(X[CL]|L?X{0,3})(I[XV]|V?I{0,3})$"
     _resources_type_re = r"^BLURAY$|^REMUX$|^HDTV$|^UHDTV$|^HDDVD$|^WEBRIP$|^DVDRIP$|^BDRIP$|^UHD$|^SDR$|^HDR\d*$|^DOLBY$|^BLU$|^WEB$|^BD$"
     _name_no_begin_re = r"^\[.+?]"
-    _name_no_chinese_re = r".*版|.*字幕组"
-    _name_se_words = ['共', '第', '季', '集', '话', '話']
-    _name_nostring_re = r"^PTS|^JADE|^AOD|^CHC|^[A-Z]{1,4}TV[\-0-9UVHDK]*|HBO|\d{1,2}th|\d{1,2}bit|NETFLIX|AMAZON|IMAX|^3D|\s+3D|BBC|DISNEY\+?|XXX|\s+DC$" \
+    _name_no_chinese_re = r".*版|.*字幕"
+    _name_se_words = ['共', '第', '季', '集', '话', '話', '期']
+    _name_nostring_re = r"^PTS|^JADE|^AOD|^CHC|^[A-Z]{1,4}TV[\-0-9UVHDK]*" \
+                        r"|HBO$|\s+HBO|\d{1,2}th|\d{1,2}bit|NETFLIX|AMAZON|IMAX|^3D|\s+3D|\s+BBC|BBC$|DISNEY\+?|XXX|\s+DC$" \
                         r"|[第\s共]+[0-9一二三四五六七八九十\-\s]+季" \
                         r"|[第\s共]+[0-9一二三四五六七八九十\-\s]+[集话話]" \
-                        r"|连载|日剧|美剧|电视剧|动画片|动漫|欧美|西德|日韩|超高清|高清|蓝光|翡翠台|梦幻天堂·龙网" \
-                        r"|最终季|合集|[多中国英葡法俄日韩德意西印泰台港粤双文语简繁体特效内封官译外挂]+字幕|版本|出品|台版|港版" \
-                        r"|未删减版|UNCUT$|UNRATE$|WITH EXTRAS$|RERIP$|SUBBED$|PROPER$|REPACK$|SEASON$|EPISODE$" \
+                        r"|连载|日剧|美剧|电视剧|动画片|动漫|欧美|西德|日韩|超高清|高清|蓝光|翡翠台|梦幻天堂·龙网|★?\d*月?新番" \
+                        r"|最终季|合集|[多中国英葡法俄日韩德意西印泰台港粤双文语简繁体特效内封官译外挂]+字幕|版本|出品|台版|港版|\w+字幕组" \
+                        r"|未删减版|UNCUT$|UNRATE$|WITH EXTRAS$|RERIP$|SUBBED$|PROPER$|REPACK$|SEASON$|EPISODE$|Complete$|Extended$|Extended Version$" \
                         r"|S\d{2}\s*-\s*S\d{2}|S\d{2}|\s+S\d{1,2}|EP?\d{2,4}\s*-\s*EP?\d{2,4}|EP?\d{2,4}|\s+EP?\d{1,4}" \
                         r"|CD[\s.]*[1-9]|DVD[\s.]*[1-9]|DISK[\s.]*[1-9]|DISC[\s.]*[1-9]" \
                         r"|[248]K|\d{3,4}[PIX]+" \
@@ -120,6 +121,8 @@ class MetaVideo(MetaBase):
         name = re.sub(r'%s' % self._name_nostring_re, '', name,
                       flags=re.IGNORECASE).strip()
         name = re.sub(r'\s+', ' ', name)
+        if self.year:
+            name = name.replace(str(self.year), '').strip()
         if name.isdigit() and int(name) < 1800:
             if self.begin_episode is None:
                 self.begin_episode = int(name)
@@ -156,7 +159,8 @@ class MetaVideo(MetaBase):
             if not self.cn_name:
                 self.cn_name = token
             elif not self._stop_cnname_flag:
-                if not re.search("%s" % self._name_no_chinese_re, token, flags=re.IGNORECASE):
+                if not re.search("%s" % self._name_no_chinese_re, token, flags=re.IGNORECASE) \
+                        and not re.search("%s" % self._name_se_words, token, flags=re.IGNORECASE):
                     self.cn_name = "%s %s" % (self.cn_name, token)
                 self._stop_cnname_flag = True
         else:
@@ -170,6 +174,12 @@ class MetaVideo(MetaBase):
                     # 名字后面以 0 开头的不要，极有可能是集
                     if token.startswith('0'):
                         return
+                    # 检查是否真正的数字
+                    if token.isdigit():
+                        try:
+                            int(token)
+                        except ValueError:
+                            return
                     # 中文名后面跟的数字不是年份的极有可能是集
                     if not is_roman_digit \
                             and self._last_token_type == "cnname" \
@@ -273,7 +283,9 @@ class MetaVideo(MetaBase):
                 if resource_pix and not self.resource_pix:
                     self.resource_pix = resource_pix.lower()
                     break
-            if self.resource_pix and self.resource_pix[-1] not in 'kpi':
+            if self.resource_pix \
+                    and self.resource_pix.isdigit() \
+                    and self.resource_pix[-1] not in 'kpi':
                 self.resource_pix = "%sp" % self.resource_pix
         else:
             re_res = re.search(r"%s" % self._resources_pix_re2, token, re.IGNORECASE)
@@ -327,19 +339,7 @@ class MetaVideo(MetaBase):
                 int(token)
             except ValueError:
                 return
-            if self.begin_season is not None \
-                    and self.end_season is None \
-                    and len(token) < 3 \
-                    and int(token) > self.begin_season \
-                    and self._last_token_type == "season" \
-                    and (not self.tokens.cur() or not self.tokens.cur().isdigit()):
-                self.end_season = int(token)
-                self.total_seasons = (self.end_season - self.begin_season) + 1
-                if self.fileflag and self.total_seasons > 1:
-                    self.end_season = None
-                    self.total_seasons = 1
-                self._continue_flag = False
-            elif self._last_token_type == "SEASON" \
+            if self._last_token_type == "SEASON" \
                     and self.begin_season is None \
                     and len(token) < 3:
                 self.begin_season = int(token)
@@ -395,6 +395,7 @@ class MetaVideo(MetaBase):
                     self.end_episode = None
                     self.total_episodes = 1
                 self._continue_flag = False
+                self.type = MediaType.TV
             elif self.begin_episode is None \
                     and 1 < len(token) < 5 \
                     and self._last_token_type != "year" \

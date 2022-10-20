@@ -1,3 +1,5 @@
+from urllib.parse import quote_plus
+
 import log
 from config import Config
 from app.message.channel.channel import IMessageChannel
@@ -24,7 +26,7 @@ class Bark(IMessageChannel):
         """
         flag, msg = self.send_msg("测试", "这是一条测试消息")
         if not flag:
-            log.error("【MSG】发送消息失败：%s" % msg)
+            log.error("【Bark】发送消息失败：%s" % msg)
         return flag
 
     def send_msg(self, title, text="", image="", url="", user_id=""):
@@ -42,7 +44,7 @@ class Bark(IMessageChannel):
         try:
             if not self.__server or not self.__apikey:
                 return False, "参数未配置"
-            sc_url = "%s/%s/%s/%s" % (self.__server, self.__apikey, title, text)
+            sc_url = "%s/%s/%s/%s" % (self.__server, self.__apikey, quote_plus(title), quote_plus(text))
             res = RequestUtils().post_res(sc_url)
             if res:
                 ret_json = res.json()

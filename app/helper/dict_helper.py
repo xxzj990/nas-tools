@@ -1,4 +1,4 @@
-from app.db.db_helper import DBHelper
+from app.db.main_db import MainDb
 
 
 class DictHelper:
@@ -16,11 +16,11 @@ class DictHelper:
         if not dtype or not key or not value:
             return False
         if DictHelper.exists(dtype, key):
-            return DBHelper().update_by_sql("UPDATE SYSTEM_DICT SET VALUE = ? WHERE TYPE = ? AND KEY = ?",
-                                            (value, dtype, key))
+            return MainDb().update_by_sql("UPDATE SYSTEM_DICT SET VALUE = ? WHERE TYPE = ? AND KEY = ?",
+                                          (value, dtype, key))
         else:
-            return DBHelper().update_by_sql("INSERT INTO SYSTEM_DICT (TYPE, KEY, VALUE, NOTE) VALUES (?, ?, ?, ?)",
-                                            (dtype, key, value, note))
+            return MainDb().update_by_sql("INSERT INTO SYSTEM_DICT (TYPE, KEY, VALUE, NOTE) VALUES (?, ?, ?, ?)",
+                                          (dtype, key, value, note))
 
     @staticmethod
     def get(dtype, key):
@@ -32,8 +32,8 @@ class DictHelper:
         """
         if not dtype or not key:
             return ""
-        ret = DBHelper().select_by_sql("SELECT VALUE FROM SYSTEM_DICT WHERE TYPE = ? AND KEY = ?",
-                                       (dtype, key))
+        ret = MainDb().select_by_sql("SELECT VALUE FROM SYSTEM_DICT WHERE TYPE = ? AND KEY = ?",
+                                     (dtype, key))
         if ret and ret[0][0]:
             return ret[0][0]
         else:
@@ -49,7 +49,7 @@ class DictHelper:
         """
         if not dtype or not key:
             return False
-        return DBHelper().update_by_sql("DELETE FROM SYSTEM_DICT WHERE TYPE = ? AND KEY = ?", (dtype, key))
+        return MainDb().update_by_sql("DELETE FROM SYSTEM_DICT WHERE TYPE = ? AND KEY = ?", (dtype, key))
 
     @staticmethod
     def exists(dtype, key):
@@ -61,7 +61,7 @@ class DictHelper:
         """
         if not dtype or not key:
             return False
-        ret = DBHelper().select_by_sql("SELECT COUNT(1) FROM SYSTEM_DICT WHERE TYPE = ? AND KEY = ?", (dtype, key))
+        ret = MainDb().select_by_sql("SELECT COUNT(1) FROM SYSTEM_DICT WHERE TYPE = ? AND KEY = ?", (dtype, key))
         if ret and ret[0][0] > 0:
             return True
         else:

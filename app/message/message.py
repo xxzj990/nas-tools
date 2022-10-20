@@ -4,8 +4,8 @@ from enum import Enum
 import log
 from config import Config
 from app.message import Bark, IyuuMsg, PushPlus, ServerChan, Telegram, WeChat
-from app.db import SqlHelper
-from app.utils import StringUtils, MessageCenter
+from app.utils import StringUtils
+from app.message.message_center import MessageCenter
 from app.utils.types import SearchType, MediaType
 
 
@@ -44,7 +44,7 @@ class Message:
         if app:
             self.__domain = app.get('domain')
             if self.__domain:
-                if not self.__domain.startswith('http://') and not self.__domain.startswith('https://'):
+                if not self.__domain.startswith('http'):
                     self.__domain = "http://" + self.__domain
 
     def get_webhook_ignore(self):
@@ -65,7 +65,7 @@ class Message:
         """
         if not self.client:
             return None
-        log.info("【MSG】发送%s消息：title=%s, text=%s" % (self.__msg_channel, title, text))
+        log.info("【Message】发送%s消息：title=%s, text=%s" % (self.__msg_channel, title, text))
         if self.__domain:
             if url:
                 url = "%s?next=%s" % (self.__domain, url)
@@ -76,7 +76,7 @@ class Message:
         self.messagecenter.insert_system_message(level="INFO", title=title, content=text)
         state, ret_msg = self.client.send_msg(title, text, image, url, user_id)
         if not state:
-            log.error("【MSG】发送消息失败：%s" % ret_msg)
+            log.error("【Message】发送消息失败：%s" % ret_msg)
         return state
 
     def send_channel_msg(self, channel, title, text="", image="", url="", user_id=""):
@@ -104,7 +104,7 @@ class Message:
         else:
             state, ret_msg = self.client.send_msg(title, text, image, url, user_id)
         if not state:
-            log.error("【MSG】发送消息失败：%s" % ret_msg)
+            log.error("【Message】发送消息失败：%s" % ret_msg)
         return state
 
     def send_channel_list_msg(self, channel, title, medias: list, user_id=""):
@@ -124,7 +124,7 @@ class Message:
         else:
             return False
         if not state:
-            log.error("【MSG】发送消息失败：%s" % ret_msg)
+            log.error("【Message】发送消息失败：%s" % ret_msg)
         return state
 
     def send_download_message(self, in_from: SearchType, can_item):
@@ -137,7 +137,7 @@ class Message:
         if self.__msg_switch and not self.__msg_switch.get("download_start"):
             return
         msg_title = can_item.get_title_ep_vote_string()
-        msg_text = f"{in_from.value}的{can_item.type.value} {can_item.get_title_string()}{can_item.get_season_episode_string()} 已开始下载"
+        msg_text = f"{in_from.value}的{can_item.type.value} {can_item.get_title_string()} {can_item.get_season_episode_string()} 已开始下载"
         if can_item.site:
             msg_text = f"{msg_text}\n站点：{can_item.site}"
         if can_item.get_resource_type_string():
@@ -162,8 +162,6 @@ class Message:
             msg_text = f"{msg_text}\n描述：{can_item.description}"
         # 发送消息
         self.sendmsg(title=msg_title, text=msg_text, image=can_item.get_message_image(), url='downloading')
-        # 登记下载历史
-        SqlHelper.insert_download_history(can_item)
 
     def send_transfer_movie_message(self, in_from: Enum, media_info, exist_filenum, category_flag):
         """
@@ -274,7 +272,7 @@ class Message:
             return
         self.sendmsg(title="站点签到", text="\n".join(msgs))
 
-    def send_transfer_fail_message(self, path, count):
+    def send_transfer_fail_message(self, path, count, text):
         """
         发送转移失败的消息
         """
@@ -282,4 +280,5 @@ class Message:
             return
         if self.__msg_switch and not self.__msg_switch.get("transfer_fail"):
             return
-        self.sendmsg(title="%s 有 %s 个文件转移失败，请登录NASTool查看" % (path, count))
+        self.sendmsg(title=f"【{count} 个文件转移失败】", text=f"路径：{path}\n原因：{text}")
+    

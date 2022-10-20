@@ -11,7 +11,7 @@ lock = threading.Lock()
 
 
 @singleton
-class DBHelper:
+class MainDb:
     __connection = None
     __db_path = None
     __pools = None
@@ -25,7 +25,7 @@ class DBHelper:
     def init_config(self):
         config = Config()
         if not config.get_config_path():
-            log.console("【ERROR】NASTOOL_CONFIG 环境变量未设置，程序无法工作，正在退出...")
+            log.console("【Config】NASTOOL_CONFIG 环境变量未设置，程序无法工作，正在退出...")
             quit()
         self.__db_path = os.path.join(config.get_config_path(), 'user.db')
         self.__pools = DBPool(
@@ -70,7 +70,7 @@ class DBHelper:
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
                                    TORRENT_NAME    TEXT,
                                    ENCLOSURE    TEXT,
-                                   TYPE TEXT,
+                                   TYPE    TEXT,
                                    TITLE    TEXT,
                                    YEAR    TEXT,
                                    SEASON    TEXT,
@@ -105,10 +105,26 @@ class DBHelper:
             cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_RSS_TVS_NAME ON RSS_TVS(NAME);''')
             # 电视剧订阅剧集明细
             cursor.execute('''CREATE TABLE IF NOT EXISTS RSS_TV_EPISODES
-                                               (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
-                                               RSSID    TEXT,
-                                               EPISODES    TEXT);''')
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   RSSID    TEXT,
+                                   EPISODES    TEXT);''')
             cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_RSS_TV_EPISODES_RSSID ON RSS_TV_EPISODES (RSSID);''')
+            # 订阅历史表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS RSS_HISTORY
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   TYPE    TEXT,
+                                   RSSID    TEXT,
+                                   NAME    TEXT,
+                                   YEAR    TEXT,
+                                   TMDBID   TEXT,
+                                   SEASON   TEXT,
+                                   IMAGE    TEXT,
+                                   DESC    TEXT,
+                                   TOTAL    INTEGER,
+                                   START    INTEGER,
+                                   FINISH_TIME    TEXT,
+                                   NOTE    TEXT);''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_RSS_HISTORY_RSSID ON RSS_HISTORY(RSSID);''')
             # 豆瓣关注信息表
             cursor.execute('''CREATE TABLE IF NOT EXISTS DOUBAN_MEDIAS
                                    (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
@@ -211,7 +227,6 @@ class DBHelper:
 
             cursor.execute(
                 '''CREATE INDEX IF NOT EXISTS INDX_SITE_STATISTICS_HISTORY_DS ON SITE_STATISTICS_HISTORY (DATE, URL);''')
-            # 唯一约束
             cursor.execute(
                 '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_STATISTICS_HISTORY_DS ON SITE_STATISTICS_HISTORY (DATE, URL);''')
 
@@ -226,7 +241,6 @@ class DBHelper:
                 '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_SEEDING_INFO_URL ON SITE_USER_SEEDING_INFO (URL);''')
             cursor.execute(
                 '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_SEEDING_INFO_SITE ON SITE_USER_SEEDING_INFO (SITE);''')
-            # 唯一约束
             cursor.execute(
                 '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_USER_SEEDING_INFO_URL ON SITE_USER_SEEDING_INFO (URL);''')
 
@@ -253,7 +267,6 @@ class DBHelper:
                 '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_INFO_STATS_URL ON SITE_USER_INFO_STATS (URL);''')
             cursor.execute(
                 '''CREATE INDEX IF NOT EXISTS INDX_SITE_USER_INFO_STATS_SITE ON SITE_USER_INFO_STATS (SITE);''')
-            # 唯一约束
             cursor.execute(
                 '''CREATE UNIQUE INDEX IF NOT EXISTS UN_INDX_SITE_USER_INFO_STATS_URL ON SITE_USER_INFO_STATS (URL);''')
             # 下载历史
@@ -323,11 +336,70 @@ class DBHelper:
                                    VALUE    TEXT,
                                    NOTE     TEXT);''')
             cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_SYSTEM_DICT ON SYSTEM_DICT (TYPE, KEY);''')
+            # 自定义订阅表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS CONFIG_USER_RSS
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   NAME    TEXT,
+                                   ADDRESS    TEXT,
+                                   PARSER    TEXT,
+                                   INTERVAL     TEXT,
+                                   USES     TEXT,
+                                   INCLUDE     TEXT,
+                                   EXCLUDE     TEXT,
+                                   FILTER     TEXT,
+                                   UPDATE_TIME     TEXT,
+                                   PROCESS_COUNT     TEXT,
+                                   STATE    TEXT,
+                                   NOTE     TEXT);''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_CONFIG_USER_RSS ON CONFIG_USER_RSS (NAME);''')
+            # 自定义订阅解析模板表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS CONFIG_RSS_PARSER
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   NAME    TEXT,
+                                   TYPE    TEXT,
+                                   FORMAT    TEXT,
+                                   PARAMS     TEXT,
+                                   NOTE     TEXT,
+                                   SYSDEF     TEXT);''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS INDX_CONFIG_RSS_PARSER ON CONFIG_RSS_PARSER (NAME);''')
+            # 自定义订阅下载记录表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS USERRSS_TASK_HISTORY
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   TASK_ID    TEXT,
+                                   TITLE    TEXT,
+                                   DOWNLOADER    TEXT,
+                                   DATE    TEXT);''')
+            cursor.execute(
+                '''CREATE INDEX IF NOT EXISTS INDX_USERRSS_TASK_HISTORY ON USERRSS_TASK_HISTORY (TASK_ID);''')
+            # 自定义识别词组表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS CUSTOM_WORD_GROUPS 
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   TITLE    TEXT,
+                                   YEAR    TEXT,
+                                   TYPE    INTEGER,
+                                   TMDBID     INTEGER,
+                                   SEASON_COUNT    INTEGER,
+                                   NOTE    TEXT);''')
+            # 自定义识别词表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS CUSTOM_WORDS 
+                                   (ID INTEGER PRIMARY KEY AUTOINCREMENT     NOT NULL,
+                                   REPLACED    TEXT,
+                                   REPLACE    TEXT,
+                                   FRONT    TEXT,
+                                   BACK    TEXT,
+                                   OFFSET    INTEGER,
+                                   TYPE    INTEGER,
+                                   GROUP_ID    INTEGER,
+                                   SEASON    INTEGER,
+                                   ENABLED    INTEGER,
+                                   REGEX    INTEGER,
+                                   HELP    TEXT,
+                                   NOTE    TEXT);''')         
             # 提交
             conn.commit()
 
         except Exception as e:
-            log.error(f"【DB】创建数据库错误：{e}")
+            log.error(f"【Db】创建数据库错误：{e}")
         finally:
             cursor.close()
             self.__pools.free(conn)
@@ -378,7 +450,7 @@ class DBHelper:
                     cursor.execute(sql)
                 conn.commit()
             except Exception as e:
-                log.error(f"【DB】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
+                log.error(f"【Db】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
                 return False
             finally:
                 cursor.close()
@@ -395,7 +467,7 @@ class DBHelper:
                 cursor.executemany(sql, data_list)
                 conn.commit()
             except Exception as e:
-                log.error(f"【DB】执行SQL出错：sql:{sql}; {e}")
+                log.error(f"【Db】执行SQL出错：sql:{sql}; {e}")
                 return False
             finally:
                 cursor.close()
@@ -415,7 +487,7 @@ class DBHelper:
                     res = cursor.execute(sql)
                 ret = res.fetchall()
             except Exception as e:
-                log.error(f"【DB】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
+                log.error(f"【Db】执行SQL出错：sql:{sql}; parameters:{data}; {e}")
                 return []
             finally:
                 cursor.close()

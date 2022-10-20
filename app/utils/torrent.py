@@ -1,13 +1,11 @@
-import random
+import os.path
 import re
-from functools import lru_cache
-from time import sleep
-
+from urllib.parse import quote
 import bencode
 from lxml import etree
 
+from app.utils.torrentParser import TorrentParser
 from config import TORRENT_SEARCH_PARAMS
-from app.sites import SiteConf
 from app.utils import RequestUtils
 
 
@@ -61,66 +59,19 @@ class Torrent:
         return True
 
     @staticmethod
-    @lru_cache(maxsize=128)
-    def check_torrent_attr(torrent_url, cookie) -> TorrentAttr:
-        """
-        检验种子是否免费，当前做种人数
-        :param torrent_url: 种子的详情页面
-        :param cookie: 站点的Cookie
-        :return: 种子属性，包含FREE 2XFREE HR PEER_COUNT等属性
-        """
-        ret_attr = TorrentAttr()
-        if not torrent_url:
-            return ret_attr
-        xpath_strs = SiteConf().get_grapsite_conf(torrent_url)
-        if not xpath_strs:
-            return ret_attr
-        res = RequestUtils(cookies=cookie).get_res(url=torrent_url)
-        if res and res.status_code == 200:
-            res.encoding = res.apparent_encoding
-            html_text = res.text
-            if not html_text:
-                return ret_attr
-            try:
-                html = etree.HTML(html_text)
-                # 检测2XFREE
-                for xpath_str in xpath_strs.get("2XFREE"):
-                    if html.xpath(xpath_str):
-                        ret_attr.free2x = True
-                # 检测FREE
-                for xpath_str in xpath_strs.get("FREE"):
-                    if html.xpath(xpath_str):
-                        ret_attr.free = True
-                # 检测HR
-                for xpath_str in xpath_strs.get("HR"):
-                    if html.xpath(xpath_str):
-                        ret_attr.hr = True
-                # 检测PEER_COUNT当前做种人数
-                for xpath_str in xpath_strs.get("PEER_COUNT"):
-                    peer_count_dom = html.xpath(xpath_str)
-                    if peer_count_dom:
-                        peer_count_str = peer_count_dom[0].text
-                        peer_count_str_re = re.search(r'^(\d+)', peer_count_str)
-                        ret_attr.peer_count = int(peer_count_str_re.group(1)) if peer_count_str_re else 0
-            except Exception as err:
-                print(err)
-        # 随机休眼后再返回
-        sleep(round(random.uniform(1, 5), 1))
-        return ret_attr
-
-    @staticmethod
-    def get_torrent_content(url, cookie=None):
+    def get_torrent_content(url, cookie=None, ua=None):
         """
         把种子下载到本地，返回种子内容
         :param url: 种子链接
         :param cookie: 站点Cookie
+        :param ua: 站点UserAgent
         """
         if not url:
             return None, "URL为空"
         if url.startswith("magnet:"):
             return url, "磁力链接"
         try:
-            req = RequestUtils(cookies=cookie).get_res(url=url)
+            req = RequestUtils(headers=ua, cookies=cookie).get_res(url=url)
             if req and req.status_code == 200:
                 if not req.content:
                     return None, "未下载到种子数据"
@@ -129,11 +80,31 @@ class Torrent:
                     return None, "不正确的种子文件"
                 return req.content, ""
             elif not req:
-                return url, "无法打开链接：%s" % url
+                return None, "无法打开链接：%s" % url
             else:
                 return None, "下载种子出错，状态码：%s" % req.status_code
         except Exception as err:
-            return None, "下载种子出现异常，%s" % str(err)
+            return None, "下载种子文件出现异常：%s，可能站点Cookie已过期或触发了站点首次种子下载" % str(err)
+
+    @staticmethod
+    def save_torrent_file(url, path, cookie, ua):
+        """
+        下载种子并保存到文件，返回文件路径
+        """
+        if not os.path.exists(path):
+            os.makedirs(path)
+        # 下载种子
+        ret = RequestUtils(cookies=cookie, headers=ua).get_res(url)
+        if ret and ret.status_code == 200:
+            file_name = re.findall(r"filename=\"(.+)\"", ret.headers.get('content-disposition'))[0]
+            file_path = os.path.join(path, file_name)
+            with open(file_path, 'wb') as f:
+                f.write(ret.content)
+        elif not ret:
+            return None
+        else:
+            return None
+        return file_path
 
     @staticmethod
     def check_torrent_filter(meta_info, filter_args, uploadvolumefactor=None, downloadvolumefactor=None):
@@ -180,10 +151,10 @@ class Torrent:
         解析订阅的NOTE字段，从中获取订阅站点、搜索站点、是否洗版、订阅质量、订阅分辨率、订阅制作组/字幕组、过滤规则等信息
         DESC字段组成：RSS站点#搜索站点#是否洗版(Y/N)#过滤条件，站点用|分隔多个站点，过滤条件用@分隔多个条件
         :param desc: RSS订阅DESC字段的值
-        :return: 订阅站点、搜索站点、是否洗版、过滤字典
+        :return: 订阅站点、搜索站点、是否洗版、过滤字典、总集数，当前集数
         """
         if not desc:
-            return [], [], False, {}
+            return {}
         rss_sites = []
         search_sites = []
         over_edition = False
@@ -191,6 +162,8 @@ class Torrent:
         rss_pix = None
         rss_team = None
         rss_rule = None
+        total_episode = None
+        current_episode = None
         notes = str(desc).split('#')
         # 订阅站点
         if len(notes) > 0:
@@ -218,5 +191,85 @@ class Torrent:
                     rss_rule = filters[2]
                 if len(filters) > 3:
                     rss_team = filters[3]
+        # 总集数及当前集数
+        if len(notes) > 4:
+            if notes[4]:
+                episode_info = notes[4].split('@')
+                if len(episode_info) > 0:
+                    total_episode = episode_info[0]
+                if len(episode_info) > 1:
+                    current_episode = episode_info[1]
+        return {
+            "rss_sites": rss_sites,
+            "search_sites": search_sites,
+            "over_edition": over_edition,
+            "filter_map": {"restype": rss_restype,
+                           "pix": rss_pix,
+                           "rule": rss_rule,
+                           "team": rss_team},
+            "episode_info": {"total": total_episode,
+                             "current": current_episode}
+        }
 
-        return rss_sites, search_sites, over_edition, {"restype": rss_restype, "pix": rss_pix, "rule": rss_rule, "team": rss_team}
+    @staticmethod
+    def parse_download_url(page_url, xpath, cookie=None, ua=None):
+        """
+        从详情页面中解析中下载链接
+        :param page_url: 详情页面地址
+        :param xpath: 解析XPATH
+        :param cookie: 站点Cookie
+        :param ua: 站点User-Agent
+        """
+        if not page_url or not xpath:
+            return ""
+        try:
+            req = RequestUtils(headers=ua, cookies=cookie).get_res(url=page_url)
+            if req and req.status_code == 200:
+                if not req.text:
+                    return None
+                html = etree.HTML(req.text)
+                urls = html.xpath(xpath)
+                if urls:
+                    return str(urls[0])
+        except Exception as err:
+            print(str(err))
+        return None
+
+    @staticmethod
+    def convert_hash_to_magnet(hash_text, title):
+        """
+        根据hash值，转换为磁力链，自动添加tracker
+        :param hash_text: 种子Hash值
+        :param title: 种子标题
+        """
+        if not hash_text or not title:
+            return None
+        hash_text = re.search(r'[0-9a-z]+', hash_text, re.IGNORECASE)
+        if not hash_text:
+            return None
+        hash_text = hash_text.group(0)
+        return f'magnet:?xt=urn:btih:{hash_text}&dn={quote(title)}&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A80' \
+               '&tr=udp%3A%2F%2Fopentor.org%3A2710' \
+               '&tr=udp%3A%2F%2Ftracker.ccc.de%3A80' \
+               '&tr=udp%3A%2F%2Ftracker.blackunicorn.xyz%3A6969' \
+               '&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969' \
+               '&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969'
+
+    @staticmethod
+    def get_torrent_files(path):
+        """
+        解析Torrent文件，获取文件清单
+        """
+        if not path or not os.path.exists(path):
+            return []
+        file_names = []
+        try:
+            torrent = TorrentParser().readFile(path=path)
+            if torrent.get("torrent"):
+                files = torrent.get("torrent").get("info", {}).get("files") or []
+                for item in files:
+                    if item.get("path"):
+                        file_names.append(item["path"][0])
+        except Exception as err:
+            print(str(err))
+        return file_names

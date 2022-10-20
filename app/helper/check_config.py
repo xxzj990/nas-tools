@@ -1,14 +1,12 @@
 import os
-
 import log
-from app.media import Category
 
 
 def check_config(config):
     """
     检查配置文件，如有错误进行日志输出
     """
-    # 剑查日志输出
+    # 检查日志输出
     if config.get_config('app'):
         logtype = config.get_config('app').get('logtype')
         if logtype:
@@ -16,13 +14,13 @@ def check_config(config):
         if logtype == "server":
             logserver = config.get_config('app').get('logserver')
             if not logserver:
-                log.console("【ERROR】日志中心地址未配置，无法正常输出日志")
+                log.console("【Config】日志中心地址未配置，无法正常输出日志")
             else:
                 log.console("日志将上送到服务器：%s" % logserver)
         elif logtype == "file":
             logpath = config.get_config('app').get('logpath')
             if not logpath:
-                log.console("【ERROR】日志文件路径未配置，无法正常输出日志")
+                log.console("【Config】日志文件路径未配置，无法正常输出日志")
             else:
                 log.console("日志将写入文件：%s" % logpath)
 
@@ -116,14 +114,6 @@ def check_config(config):
         category = config.get_config('media').get('category')
         if not category:
             log.info("未配置分类策略")
-        else:
-            cates = Category()
-            if cates.get_movie_categorys():
-                log.info("电影分类：%s" % " ".join(cates.get_movie_categorys()))
-            if cates.get_tv_categorys():
-                log.info("电视剧分类：%s" % " ".join(cates.get_tv_categorys()))
-            if cates.get_anime_categorys():
-                log.info("动漫分类：%s" % " ".join(cates.get_anime_categorys()))
     else:
         log.error("配置文件格式错误，找不到media配置项！")
 

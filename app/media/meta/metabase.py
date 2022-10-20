@@ -79,31 +79,52 @@ class MetaBase(object):
     # TMDB 的其它信息
     tmdb_info = {}
     # 种子附加信息
+    # 站点名称
     site = None
+    # 站点优先级
     site_order = 0
+    # 种子链接
     enclosure = None
+    # 资源优先级
     res_order = 0
+    # 种子大小
     size = 0
+    # 做种者
     seeders = 0
+    # 下载者
     peers = 0
+    # 种子描述
     description = None
+    # 详情页面
     page_url = None
+    # 上传因子
     upload_volume_factor = None
+    # 下载因子
     download_volume_factor = None
+    # HR
     hit_and_run = None
+    # 订阅ID
     rssid = None
+    # 保存目录
+    save_dir = None
+    # 识别辅助
+    ignored_words = None
+    replaced_words = None
+    offset_words = None
+    # 备注字典
+    note = {}
     # 副标题解析
     _subtitle_flag = False
     _subtitle_season_re = r"[第\s]+([0-9一二三四五六七八九十S\-]+)\s*季"
     _subtitle_season_all_re = r"全\s*([0-9一二三四五六七八九十]+)\s*季|([0-9一二三四五六七八九十]+)\s*季全"
-    _subtitle_episode_re = r"[第\s]+([0-9一二三四五六七八九十EP\-]+)\s*[集话話]"
-    _subtitle_episode_all_re = r"([0-9一二三四五六七八九十]+)\s*集全|全\s*([0-9一二三四五六七八九十]+)\s*集"
+    _subtitle_episode_re = r"[第\s]+([0-9一二三四五六七八九十EP\-]+)\s*[集话話期]"
+    _subtitle_episode_all_re = r"([0-9一二三四五六七八九十]+)\s*集全|全\s*([0-9一二三四五六七八九十]+)\s*[集话話期]"
 
     def __init__(self, title, subtitle=None, fileflag=False):
-        if not title:
-            return
         self.category_handler = Category()
         self.fanart = Fanart()
+        if not title:
+            return
         self.org_string = title
         self.subtitle = subtitle
         self.fileflag = fileflag
@@ -296,7 +317,7 @@ class MetaBase(object):
         return self.audio_encode or ""
 
     # 返回背景图片地址
-    def get_backdrop_image(self, default=True):
+    def get_backdrop_image(self, default=True, original=False):
         if self.fanart_backdrop:
             return self.fanart_backdrop
         else:
@@ -305,7 +326,10 @@ class MetaBase(object):
         if self.fanart_backdrop:
             return self.fanart_backdrop
         elif self.backdrop_path:
-            return self.backdrop_path
+            if original:
+                return self.backdrop_path.replace("/w500", "/original")
+            else:
+                return self.backdrop_path
         else:
             return "../static/img/tmdb.webp" if default else ""
 
@@ -326,13 +350,21 @@ class MetaBase(object):
             return DEFAULT_TMDB_IMAGE
 
     # 返回海报图片地址
-    def get_poster_image(self):
+    def get_poster_image(self, original=False):
         if self.fanart_poster:
             return self.fanart_poster
         else:
             self.fanart_poster = self.fanart.get_poster(media_type=self.type,
                                                         queryid=self.tmdb_id if self.type == MediaType.MOVIE else self.tvdb_id)
-        return self.fanart_poster if self.fanart_poster else self.poster_path or ""
+        if self.fanart_poster:
+            return self.fanart_poster
+        elif self.poster_path:
+            if original:
+                return self.poster_path.replace("/w500", "/original")
+            else:
+                return self.poster_path
+        else:
+            return ""
 
     # 返回促销信息
     def get_volume_factor_string(self):
@@ -439,7 +471,8 @@ class MetaBase(object):
                          upload_volume_factor=None,
                          download_volume_factor=None,
                          rssid=None,
-                         hit_and_run=None):
+                         hit_and_run=None,
+                         imdbid=None):
         if site:
             self.site = site
         if site_order:
@@ -466,6 +499,8 @@ class MetaBase(object):
             self.rssid = rssid
         if hit_and_run is not None:
             self.hit_and_run = hit_and_run
+        if imdbid is not None:
+            self.imdb_id = imdbid
 
     # 判断电视剧是否为动漫
     def __get_tmdb_type(self, info):
@@ -491,7 +526,7 @@ class MetaBase(object):
     def init_subtitle(self, title_text):
         if not title_text:
             return
-        if re.search(r'[全第季集话話]', title_text, re.IGNORECASE):
+        if re.search(r'[全第季集话話期]', title_text, re.IGNORECASE):
             # 第x季
             season_str = re.search(r'%s' % self._subtitle_season_re, title_text, re.IGNORECASE)
             if season_str:
@@ -560,6 +595,7 @@ class MetaBase(object):
                 self.begin_episode = None
                 self.end_episode = None
                 self.total_episodes = 0
+                self.type = MediaType.TV
             # 全x季 x季全
             season_all_str = re.search(r"%s" % self._subtitle_season_all_re, title_text, re.IGNORECASE)
             if season_all_str:
@@ -574,4 +610,5 @@ class MetaBase(object):
                         return
                     self.begin_season = 1
                     self.end_season = self.total_seasons
+                    self.type = MediaType.TV
                     self._subtitle_flag = True
